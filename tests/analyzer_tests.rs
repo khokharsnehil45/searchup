@@ -140,3 +140,115 @@ fn test_all_occurrences_collection() {
     assert_eq!(result_all.total_matches, 50);
     assert_eq!(result_all.sample_occurrences.len(), 50); // all 50 collected!
 }
+
+#[test]
+fn test_fill_single_coord_literal() {
+    let mut temp = NamedTempFile::new().unwrap();
+    writeln!(temp, "id,name,age").unwrap();
+    writeln!(temp, "1,Alice,30").unwrap();
+    writeln!(temp, "2,,25").unwrap(); // row 3, missing name
+
+    let out_file = NamedTempFile::new().unwrap();
+    let fill_config = searchup::FillConfig {
+        input_path: temp.path().to_path_buf(),
+        output_path: out_file.path().to_path_buf(),
+        in_place: false,
+        target: searchup::FillTarget {
+            row: Some(3),
+            col: "name".to_string(),
+        },
+        strategy: searchup::FillStrategy::Literal("Bob".to_string()),
+    };
+
+    let result = searchup::execute_fill(&fill_config).expect("Fill failed");
+    assert_eq!(result.cells_updated, 1);
+    assert_eq!(result.imputed_value, "Bob");
+
+    let contents = std::fs::read_to_string(out_file.path()).unwrap();
+    assert!(contents.contains("2,Bob,25"));
+}
+
+#[test]
+fn test_fill_with_mean_numeric() {
+    let mut temp = NamedTempFile::new().unwrap();
+    writeln!(temp, "id,score").unwrap();
+    writeln!(temp, "1,10").unwrap();
+    writeln!(temp, "2,20").unwrap();
+    writeln!(temp, "3,30").unwrap();
+    writeln!(temp, "4,NA").unwrap(); // row 5, missing score
+
+    let out_file = NamedTempFile::new().unwrap();
+    let fill_config = searchup::FillConfig {
+        input_path: temp.path().to_path_buf(),
+        output_path: out_file.path().to_path_buf(),
+        in_place: false,
+        target: searchup::FillTarget {
+            row: Some(5),
+            col: "score".to_string(),
+        },
+        strategy: searchup::FillStrategy::Mean,
+    };
+
+    let result = searchup::execute_fill(&fill_config).expect("Fill failed");
+    // Mean of 10, 20, 30 is 20
+    assert_eq!(result.imputed_value, "20");
+    assert_eq!(result.cells_updated, 1);
+
+    let contents = std::fs::read_to_string(out_file.path()).unwrap();
+    assert!(contents.contains("4,20"));
+}
+
+#[test]
+fn test_fill_with_mean_non_numeric_error() {
+    let mut temp = NamedTempFile::new().unwrap();
+    writeln!(temp, "id,city").unwrap();
+    writeln!(temp, "1,London").unwrap();
+    writeln!(temp, "2,Paris").unwrap();
+    writeln!(temp, "3,NA").unwrap();
+
+    let out_file = NamedTempFile::new().unwrap();
+    let fill_config = searchup::FillConfig {
+        input_path: temp.path().to_path_buf(),
+        output_path: out_file.path().to_path_buf(),
+        in_place: false,
+        target: searchup::FillTarget {
+            row: Some(4),
+            col: "city".to_string(),
+        },
+        strategy: searchup::FillStrategy::Mean,
+    };
+
+    let result = searchup::execute_fill(&fill_config);
+    assert!(result.is_err());
+    let err_msg = result.err().unwrap().to_string();
+    assert!(err_msg.contains("contains non-numeric value"));
+}
+
+#[test]
+fn test_fill_column_wide() {
+    let mut temp = NamedTempFile::new().unwrap();
+    writeln!(temp, "id,status").unwrap();
+    writeln!(temp, "1,active").unwrap();
+    writeln!(temp, "2,").unwrap();
+    writeln!(temp, "3,active").unwrap();
+    writeln!(temp, "4,null").unwrap();
+
+    let out_file = NamedTempFile::new().unwrap();
+    let fill_config = searchup::FillConfig {
+        input_path: temp.path().to_path_buf(),
+        output_path: out_file.path().to_path_buf(),
+        in_place: false,
+        target: searchup::FillTarget {
+            row: None, // entire column
+            col: "status".to_string(),
+        },
+        strategy: searchup::FillStrategy::Literal("pending".to_string()),
+    };
+
+    let result = searchup::execute_fill(&fill_config).expect("Fill failed");
+    assert_eq!(result.cells_updated, 2);
+
+    let contents = std::fs::read_to_string(out_file.path()).unwrap();
+    assert!(contents.contains("2,pending"));
+    assert!(contents.contains("4,pending"));
+}

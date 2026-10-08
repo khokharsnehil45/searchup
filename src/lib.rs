@@ -1,8 +1,9 @@
 use rayon::prelude::*;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
@@ -188,6 +189,387 @@ impl AnalysisResult {
             serde_json::to_string(&report)
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub enum FillStrategy {
+    Literal(String),
+    Mean,
+    Median,
+    Mode,
+}
+
+impl FillStrategy {
+    pub fn parse(input: &str) -> Self {
+        match input.trim().to_lowercase().as_str() {
+            "mean" => FillStrategy::Mean,
+            "median" => FillStrategy::Median,
+            "mode" => FillStrategy::Mode,
+            _ => FillStrategy::Literal(input.trim().to_string()),
+        }
+    }
+
+    pub fn display_name(&self) -> String {
+        match self {
+            FillStrategy::Literal(v) => format!("Literal: \"{}\"", v),
+            FillStrategy::Mean => "Mean (arithmetic average)".to_string(),
+            FillStrategy::Median => "Median".to_string(),
+            FillStrategy::Mode => "Mode (most frequent)".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FillTarget {
+    pub row: Option<usize>, // 1-based CSV line number (matching occurrence row index)
+    pub col: String,        // Column name or 1-based index
+}
+
+pub fn parse_coord(coord_str: &str) -> Result<(usize, String), String> {
+    let clean = coord_str
+        .trim()
+        .trim_matches(|c| c == '(' || c == ')' || c == '[' || c == ']');
+    let parts: Vec<&str> = clean.split(',').map(|s| s.trim()).collect();
+    if parts.len() != 2 {
+        return Err(format!(
+            "Invalid coordinate '{}'. Expected 'row,col', e.g. '5,age' or '5,3'",
+            coord_str
+        ));
+    }
+    let row: usize = parts[0]
+        .parse()
+        .map_err(|_| format!("Invalid row index '{}' in coordinate", parts[0]))?;
+    if row < 2 {
+        return Err(format!(
+            "Invalid row {}: header is row 1, data rows start at row 2",
+            row
+        ));
+    }
+    let col = parts[1].to_string();
+    if col.is_empty() {
+        return Err("Column identifier cannot be empty".to_string());
+    }
+    Ok((row, col))
+}
+
+#[derive(Debug, Clone)]
+pub struct FillConfig {
+    pub input_path: PathBuf,
+    pub output_path: PathBuf,
+    pub in_place: bool,
+    pub target: FillTarget,
+    pub strategy: FillStrategy,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FillResult {
+    pub status: String,
+    pub action: String,
+    pub file_path: String,
+    pub output_path: String,
+    pub target_row: Option<usize>,
+    pub target_column: String,
+    pub target_column_index: usize,
+    pub strategy: String,
+    pub imputed_value: String,
+    pub cells_updated: usize,
+}
+
+impl FillResult {
+    pub fn to_json(&self, pretty: bool) -> Result<String, serde_json::Error> {
+        if pretty {
+            serde_json::to_string_pretty(self)
+        } else {
+            serde_json::to_string(self)
+        }
+    }
+}
+
+pub fn execute_fill(
+    config: &FillConfig,
+) -> Result<FillResult, Box<dyn std::error::Error + Send + Sync>> {
+    let file = File::open(&config.input_path)?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(BufReader::with_capacity(128 * 1024, file));
+
+    let headers: Vec<String> = reader
+        .headers()?
+        .iter()
+        .map(|h| h.trim().to_string())
+        .collect();
+
+    if headers.is_empty() {
+        return Err("CSV file contains no headers".into());
+    }
+
+    // Resolve column index
+    let (col_idx, col_name) = if let Ok(one_based_idx) = config.target.col.parse::<usize>() {
+        if one_based_idx == 0 || one_based_idx > headers.len() {
+            return Err(format!(
+                "Column index {} out of range (1 to {})",
+                one_based_idx,
+                headers.len()
+            )
+            .into());
+        }
+        let zero_idx = one_based_idx - 1;
+        (zero_idx, headers[zero_idx].clone())
+    } else {
+        let needle = config.target.col.trim().to_lowercase();
+        let found = headers
+            .iter()
+            .enumerate()
+            .find(|(_, h)| h.trim().to_lowercase() == needle);
+        match found {
+            Some((idx, name)) => (idx, name.clone()),
+            None => {
+                return Err(format!(
+                    "Column '{}' not found in CSV headers: {:?}",
+                    config.target.col, headers
+                )
+                .into());
+            }
+        }
+    };
+
+    // Determine imputed value based on strategy
+    let imputed_value = match &config.strategy {
+        FillStrategy::Literal(val) => val.clone(),
+        FillStrategy::Mean | FillStrategy::Median => {
+            let file_scan = File::open(&config.input_path)?;
+            let mut scan_reader = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .flexible(true)
+                .from_reader(BufReader::new(file_scan));
+
+            let mut numbers: Vec<f64> = Vec::new();
+            let mut row_num = 2;
+            let mut record = csv::ByteRecord::new();
+
+            while scan_reader.read_byte_record(&mut record)? {
+                if col_idx < record.len() {
+                    let field = &record[col_idx];
+                    if !is_missing_value(field) {
+                        let text = std::str::from_utf8(field).map_err(|_| {
+                            format!(
+                                "Column '{}' at row {} contains non-UTF8 bytes; cannot compute {}",
+                                col_name,
+                                row_num,
+                                config.strategy.display_name()
+                            )
+                        })?;
+                        let trimmed = text.trim();
+                        match trimmed.parse::<f64>() {
+                            Ok(num) => numbers.push(num),
+                            Err(_) => {
+                                return Err(format!(
+                                    "Column '{}' contains non-numeric value \"{}\" at row {}; cannot compute {}",
+                                    col_name,
+                                    trimmed,
+                                    row_num,
+                                    config.strategy.display_name()
+                                )
+                                .into());
+                            }
+                        }
+                    }
+                }
+                row_num += 1;
+            }
+
+            if numbers.is_empty() {
+                return Err(format!(
+                    "Column '{}' contains no non-missing numeric values to compute {}",
+                    col_name,
+                    config.strategy.display_name()
+                )
+                .into());
+            }
+
+            match config.strategy {
+                FillStrategy::Mean => {
+                    let sum: f64 = numbers.iter().sum();
+                    let mean = sum / numbers.len() as f64;
+                    if mean.fract() == 0.0 {
+                        format!("{:.0}", mean)
+                    } else {
+                        format!("{:.2}", mean)
+                    }
+                }
+                FillStrategy::Median => {
+                    numbers.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                    let mid = numbers.len() / 2;
+                    let median = if numbers.len() % 2 == 0 {
+                        (numbers[mid - 1] + numbers[mid]) / 2.0
+                    } else {
+                        numbers[mid]
+                    };
+                    if median.fract() == 0.0 {
+                        format!("{:.0}", median)
+                    } else {
+                        format!("{:.2}", median)
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        FillStrategy::Mode => {
+            let file_scan = File::open(&config.input_path)?;
+            let mut scan_reader = csv::ReaderBuilder::new()
+                .has_headers(true)
+                .flexible(true)
+                .from_reader(BufReader::new(file_scan));
+
+            let mut freq: HashMap<String, usize> = HashMap::new();
+            let mut record = csv::ByteRecord::new();
+
+            while scan_reader.read_byte_record(&mut record)? {
+                if col_idx < record.len() {
+                    let field = &record[col_idx];
+                    if !is_missing_value(field) {
+                        let text = String::from_utf8_lossy(field).trim().to_string();
+                        *freq.entry(text).or_insert(0) += 1;
+                    }
+                }
+            }
+
+            let mode_val = freq
+                .into_iter()
+                .max_by_key(|&(_, count)| count)
+                .map(|(val, _)| val)
+                .ok_or_else(|| {
+                    format!(
+                        "Column '{}' contains no non-missing values to compute mode",
+                        col_name
+                    )
+                })?;
+            mode_val
+        }
+    };
+
+    // Second pass: write modified CSV
+    let target_write_path = if config.in_place {
+        let parent = config.input_path.parent().unwrap_or_else(|| Path::new("."));
+        let temp_filename = format!(
+            ".searchup_tmp_{}_{}.csv",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+        );
+        parent.join(temp_filename)
+    } else {
+        config.output_path.clone()
+    };
+
+    let mut writer = csv::WriterBuilder::new().from_path(&target_write_path)?;
+    writer.write_record(&headers)?;
+
+    let file_input = File::open(&config.input_path)?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(BufReader::new(file_input));
+
+    let mut row_idx = 2; // header is row 1, data starts at row 2
+    let mut cells_updated = 0;
+    let mut record = csv::StringRecord::new();
+
+    while reader.read_record(&mut record)? {
+        let is_target_row = match config.target.row {
+            Some(r) => r == row_idx,
+            None => true,
+        };
+
+        if is_target_row {
+            while record.len() <= col_idx {
+                record.push_field("");
+            }
+
+            let current_val = &record[col_idx];
+            let should_fill = if config.target.row.is_some() {
+                true
+            } else {
+                is_missing_value(current_val.as_bytes())
+            };
+
+            if should_fill {
+                let mut new_record = csv::StringRecord::new();
+                for (i, field) in record.iter().enumerate() {
+                    if i == col_idx {
+                        new_record.push_field(&imputed_value);
+                    } else {
+                        new_record.push_field(field);
+                    }
+                }
+                record = new_record;
+                cells_updated += 1;
+            }
+        }
+
+        writer.write_record(&record)?;
+        row_idx += 1;
+    }
+
+    writer.flush()?;
+
+    if config.in_place {
+        std::fs::rename(&target_write_path, &config.input_path)?;
+    }
+
+    let final_dest = if config.in_place {
+        config.input_path.display().to_string()
+    } else {
+        config.output_path.display().to_string()
+    };
+
+    Ok(FillResult {
+        status: "success".to_string(),
+        action: "fill".to_string(),
+        file_path: config.input_path.display().to_string(),
+        output_path: final_dest,
+        target_row: config.target.row,
+        target_column: col_name,
+        target_column_index: col_idx + 1,
+        strategy: match &config.strategy {
+            FillStrategy::Literal(_) => "literal".to_string(),
+            FillStrategy::Mean => "mean".to_string(),
+            FillStrategy::Median => "median".to_string(),
+            FillStrategy::Mode => "mode".to_string(),
+        },
+        imputed_value,
+        cells_updated,
+    })
+}
+
+pub fn format_fill_report(result: &FillResult) -> String {
+    let mut out = String::new();
+    out.push_str("======================================================================\n");
+    out.push_str("                     SEARCHUP CSV IMPUTER / FILLER                    \n");
+    out.push_str("======================================================================\n");
+    out.push_str(&format!("  Input File:      {}\n", result.file_path));
+    out.push_str(&format!("  Output File:     {}\n", result.output_path));
+    out.push_str(&format!(
+        "  Target Column:   {} (Index {})\n",
+        result.target_column, result.target_column_index
+    ));
+    match result.target_row {
+        Some(r) => out.push_str(&format!("  Target Row:      Row {}\n", r)),
+        None => out.push_str("  Target Scope:    Entire Column (All Missing Values)\n"),
+    }
+    out.push_str(&format!(
+        "  Strategy:        {}\n",
+        result.strategy.to_uppercase()
+    ));
+    out.push_str(&format!("  Imputed Value:   \"{}\"\n", result.imputed_value));
+    out.push_str(&format!("  Cells Updated:   {}\n", result.cells_updated));
+    out.push_str("======================================================================\n");
+    out.push_str("  Status: Successfully completed imputation.\n");
+    out.push_str("======================================================================\n");
+    out
 }
 
 pub fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
@@ -733,5 +1115,14 @@ mod tests {
         assert!(json.contains("\"total_missing\": 3") || json.contains("\"total_matches\": 3"));
         assert!(json.contains("\"file_path\": \"test.csv\""));
         assert!(json.contains("\"workers_used\": 4"));
+    }
+
+    #[test]
+    fn test_parse_coord() {
+        assert_eq!(parse_coord("5,3").unwrap(), (5, "3".to_string()));
+        assert_eq!(parse_coord("(5, age)").unwrap(), (5, "age".to_string()));
+        assert_eq!(parse_coord("[10, score]").unwrap(), (10, "score".to_string()));
+        assert!(parse_coord("invalid").is_err());
+        assert!(parse_coord("1,age").is_err()); // row 1 is header
     }
 }

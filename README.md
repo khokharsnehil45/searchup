@@ -87,6 +87,30 @@ searchup --load data.csv --search missing_values --workers 4 --all --json
 searchup --load data.csv --search missing_values --limit 100
 ```
 
+### 6. Missing Value Imputation / Filling (`--fill`)
+Clean and repair missing values manually or dynamically with statistical strategies:
+
+```bash
+# 1. Fill a specific coordinate manually with a literal value
+searchup --load data.csv --fill --coord 5,age --val 25 --out cleaned.csv
+# Also accepts numeric column index:
+searchup --load data.csv --fill --coord "5, 3" --val 25 --out cleaned.csv
+
+# 2. Fill a specific coordinate with the column's arithmetic mean
+# (Fails safely if the column contains non-numeric text)
+searchup --load data.csv --fill --coord 5,age --val mean --out cleaned.csv
+
+# 3. Fill all missing values across an entire column with mean / median / mode
+searchup --load data.csv --fill --col age --val mean --out cleaned.csv
+searchup --load data.csv --fill --col country --val mode --out cleaned.csv
+
+# 4. Safely update the file in-place (atomic temp-file replace)
+searchup --load data.csv --fill --coord 5,age --val mean --in-place
+
+# 5. Agent confirmation via structured JSON
+searchup --load data.csv --fill --coord 5,score --val mean --out cleaned.csv --json
+```
+
 ---
 
 ## 📊 Sample Output
@@ -186,13 +210,22 @@ A fast CLI tool that utilizes parallel worker threads to analyze CSV files, dete
 Usage: searchup [OPTIONS] --load <FILE>
 
 Options:
-  -l, --load <FILE>              Path to the CSV file to analyze
+  -l, --load <FILE>              Path to the CSV file to analyze or modify
   -s, --search <TARGET>...       Target to search (e.g. 'missing_values', 'missing values', or text query)
   -w, --workers <NUM>            Number of parallel worker threads (defaults to available CPU cores)
       --batch-size <BATCH_SIZE>  Batch size for worker chunks [default: 4096]
       --json                     Dump structured JSON output for AI agents and automation
       --limit <LIMIT>            Maximum occurrences to output in detail (default: 15; use 0 for unlimited)
   -a, --all                      Output ALL occurrences without truncating
+
+Fill / Imputation Options:
+      --fill                     Enable missing value fill / imputation mode
+      --coord <ROW,COL>          Coordinate to fill, e.g. '5,3', '5,age', or '(5,3)'
+      --row <ROW>                Target row number (1-based line number)
+      --col <COL>                Target column name or 1-based index
+      --val <VALUE>              Imputed value or strategy ('mean', 'median', 'mode', or literal)
+  -o, --out <FILE>               Destination file to write modified CSV
+      --in-place                 Overwrite loaded CSV in-place safely via atomic temporary file
   -h, --help                     Print help
   -V, --version                  Print version
 ```
