@@ -94,3 +94,26 @@ fn test_text_search_mode() {
     assert_eq!(result.affected_rows, 2);
     assert_eq!(result.column_stats[2].match_count, 2);
 }
+
+#[test]
+fn test_json_output_structure() {
+    let mut temp = NamedTempFile::new().unwrap();
+    writeln!(temp, "id,col_a,col_b").unwrap();
+    writeln!(temp, "1,,hello").unwrap();
+    writeln!(temp, "2,world,null").unwrap();
+
+    let config = AnalysisConfig::new(temp.path().to_path_buf(), SearchMode::MissingValues, 2);
+    let result = run_analysis(&config).expect("Analysis failed");
+    let json_str = result.to_json(true).expect("JSON conversion failed");
+
+    let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("Valid JSON");
+    assert_eq!(parsed["summary"]["total_rows"], 2);
+    assert_eq!(parsed["summary"]["total_columns"], 3);
+    assert_eq!(parsed["summary"]["total_matches"], 2);
+    assert_eq!(parsed["summary"]["affected_rows"], 2);
+    assert_eq!(parsed["columns"].as_array().unwrap().len(), 3);
+    assert_eq!(parsed["columns"][1]["name"], "col_a");
+    assert_eq!(parsed["columns"][1]["match_count"], 1);
+    assert_eq!(parsed["columns"][2]["name"], "col_b");
+    assert_eq!(parsed["columns"][2]["match_count"], 1);
+}

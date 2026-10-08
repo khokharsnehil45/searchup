@@ -27,6 +27,10 @@ struct Args {
     /// Batch size for worker chunks (default: 4096)
     #[arg(long, default_value_t = 4096)]
     batch_size: usize,
+
+    /// Dump structured JSON output for AI agents and automation
+    #[arg(long)]
+    json: bool,
 }
 
 fn main() {
@@ -62,8 +66,18 @@ fn main() {
 
     match run_analysis(&config) {
         Ok(result) => {
-            let report = format_report(&result);
-            print!("{}", report);
+            if args.json {
+                match result.to_json(true) {
+                    Ok(json_output) => println!("{}", json_output),
+                    Err(err) => {
+                        eprintln!("Error generating JSON: {}", err);
+                        process::exit(1);
+                    }
+                }
+            } else {
+                let report = format_report(&result);
+                print!("{}", report);
+            }
         }
         Err(err) => {
             eprintln!("Error during analysis: {}", err);

@@ -66,6 +66,13 @@ Search across all columns for specific keywords or substrings:
 searchup --load data.csv --search Canada --workers 4
 ```
 
+### 4. Structured JSON Output (For AI Agents & Automation)
+Add `--json` to output machine-readable, structured JSON directly to stdout:
+
+```bash
+searchup --load data.csv --search missing_values --workers 4 --json
+```
+
 ---
 
 ## 📊 Sample Output
@@ -110,6 +117,51 @@ Running `searchup --load examples/sample.csv --search missing_values --workers 4
 ======================================================================
 ```
 
+### Structured JSON Format (`--json`)
+
+```json
+{
+  "file_path": "sample.csv",
+  "file_size_bytes": 284,
+  "search_target": "missing_values",
+  "workers_used": 4,
+  "execution_time_ms": 1.12,
+  "summary": {
+    "total_rows": 8,
+    "total_columns": 6,
+    "total_cells": 48,
+    "total_matches": 8,
+    "match_percentage_cells": 16.67,
+    "affected_rows": 7,
+    "affected_percentage_rows": 87.5
+  },
+  "columns": [
+    {
+      "index": 1,
+      "name": "id",
+      "match_count": 0,
+      "match_percentage": 0.0,
+      "total_rows": 8
+    },
+    {
+      "index": 2,
+      "name": "name",
+      "match_count": 1,
+      "match_percentage": 12.5,
+      "total_rows": 8
+    }
+  ],
+  "sample_occurrences": [
+    {
+      "row": 2,
+      "col_idx": 1,
+      "col_name": "name",
+      "value_preview": "<empty>"
+    }
+  ]
+}
+```
+
 ---
 
 ## 🛠️ CLI Options
@@ -124,6 +176,7 @@ Options:
   -s, --search <TARGET>...       Target to search (e.g. 'missing_values', 'missing values', or text query)
   -w, --workers <NUM>            Number of parallel worker threads (defaults to available CPU cores)
       --batch-size <BATCH_SIZE>  Batch size for worker chunks [default: 4096]
+      --json                     Dump structured JSON output for AI agents and automation
   -h, --help                     Print help
   -V, --version                  Print version
 ```

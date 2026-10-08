@@ -1,11 +1,12 @@
 use rayon::prelude::*;
+use serde::Serialize;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::PathBuf;
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum SearchMode {
     MissingValues,
     Text(String),
@@ -48,7 +49,7 @@ impl AnalysisConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct Occurrence {
     pub row: usize,
     pub col_idx: usize,
@@ -56,12 +57,44 @@ pub struct Occurrence {
     pub value_preview: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ColumnStats {
     pub index: usize,
     pub name: String,
     pub match_count: usize,
     pub total_rows: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentSummary {
+    pub total_rows: usize,
+    pub total_columns: usize,
+    pub total_cells: usize,
+    pub total_matches: usize,
+    pub match_percentage_cells: f64,
+    pub affected_rows: usize,
+    pub affected_percentage_rows: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentColumnInfo {
+    pub index: usize,
+    pub name: String,
+    pub match_count: usize,
+    pub match_percentage: f64,
+    pub total_rows: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentReport {
+    pub file_path: String,
+    pub file_size_bytes: u64,
+    pub search_target: String,
+    pub workers_used: usize,
+    pub execution_time_ms: f64,
+    pub summary: AgentSummary,
+    pub columns: Vec<AgentColumnInfo>,
+    pub sample_occurrences: Vec<Occurrence>,
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +111,71 @@ pub struct AnalysisResult {
     pub total_matches: usize,
     pub column_stats: Vec<ColumnStats>,
     pub sample_occurrences: Vec<Occurrence>,
+}
+
+impl AnalysisResult {
+    pub fn to_agent_report(&self) -> AgentReport {
+        let cell_pct = if self.total_cells > 0 {
+            (self.total_matches as f64 / self.total_cells as f64) * 100.0
+        } else {
+            0.0
+        };
+        let row_pct = if self.total_rows > 0 {
+            (self.affected_rows as f64 / self.total_rows as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let columns = self
+            .column_stats
+            .iter()
+            .map(|c| {
+                let pct = if c.total_rows > 0 {
+                    (c.match_count as f64 / c.total_rows as f64) * 100.0
+                } else {
+                    0.0
+                };
+                AgentColumnInfo {
+                    index: c.index,
+                    name: c.name.clone(),
+                    match_count: c.match_count,
+                    match_percentage: (pct * 100.0).round() / 100.0,
+                    total_rows: c.total_rows,
+                }
+            })
+            .collect();
+
+        AgentReport {
+            file_path: self.file_path.display().to_string(),
+            file_size_bytes: self.file_size_bytes,
+            search_target: match &self.search_mode {
+                SearchMode::MissingValues => "missing_values".to_string(),
+                SearchMode::Text(query) => query.clone(),
+            },
+            workers_used: self.workers_used,
+            execution_time_ms: (self.duration.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
+            summary: AgentSummary {
+                total_rows: self.total_rows,
+                total_columns: self.total_columns,
+                total_cells: self.total_cells,
+                total_matches: self.total_matches,
+                match_percentage_cells: (cell_pct * 100.0).round() / 100.0,
+                affected_rows: self.affected_rows,
+                affected_percentage_rows: (row_pct * 100.0).round() / 100.0,
+            },
+            columns,
+            sample_occurrences: self.sample_occurrences.clone(),
+        }
+    }
+
+    pub fn to_json(&self, pretty: bool) -> Result<String, serde_json::Error> {
+        let report = self.to_agent_report();
+        if pretty {
+            serde_json::to_string_pretty(&report)
+        } else {
+            serde_json::to_string(&report)
+        }
+    }
 }
 
 pub fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
@@ -559,5 +657,47 @@ mod tests {
         assert_eq!(format_number(999), "999");
         assert_eq!(format_number(1000), "1,000");
         assert_eq!(format_number(1234567), "1,234,567");
+    }
+
+    #[test]
+    fn test_json_serialization() {
+        let result = AnalysisResult {
+            file_path: PathBuf::from("test.csv"),
+            file_size_bytes: 1024,
+            search_mode: SearchMode::MissingValues,
+            workers_used: 4,
+            duration: Duration::from_millis(50),
+            total_rows: 10,
+            total_columns: 2,
+            total_cells: 20,
+            affected_rows: 2,
+            total_matches: 3,
+            column_stats: vec![
+                ColumnStats {
+                    index: 1,
+                    name: "col1".to_string(),
+                    match_count: 1,
+                    total_rows: 10,
+                },
+                ColumnStats {
+                    index: 2,
+                    name: "col2".to_string(),
+                    match_count: 2,
+                    total_rows: 10,
+                },
+            ],
+            sample_occurrences: vec![Occurrence {
+                row: 2,
+                col_idx: 0,
+                col_name: "col1".to_string(),
+                value_preview: "<empty>".to_string(),
+            }],
+        };
+
+        let json = result.to_json(true).expect("JSON serialization failed");
+        assert!(json.contains("\"search_target\": \"missing_values\""));
+        assert!(json.contains("\"total_missing\": 3") || json.contains("\"total_matches\": 3"));
+        assert!(json.contains("\"file_path\": \"test.csv\""));
+        assert!(json.contains("\"workers_used\": 4"));
     }
 }
