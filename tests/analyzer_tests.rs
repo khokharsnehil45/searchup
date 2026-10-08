@@ -117,3 +117,26 @@ fn test_json_output_structure() {
     assert_eq!(parsed["columns"][2]["name"], "col_b");
     assert_eq!(parsed["columns"][2]["match_count"], 1);
 }
+
+#[test]
+fn test_all_occurrences_collection() {
+    let mut temp = NamedTempFile::new().unwrap();
+    writeln!(temp, "id,col_a,col_b").unwrap();
+    // 50 rows, each row has 1 missing value (50 total missing values)
+    for i in 1..=50 {
+        writeln!(temp, "{},,val", i).unwrap();
+    }
+
+    // Default limit (15)
+    let config_default = AnalysisConfig::new(temp.path().to_path_buf(), SearchMode::MissingValues, 2);
+    let result_default = run_analysis(&config_default).expect("Analysis failed");
+    assert_eq!(result_default.total_matches, 50);
+    assert_eq!(result_default.sample_occurrences.len(), 15);
+
+    // Unlimited (--all / limit None)
+    let config_all = AnalysisConfig::new(temp.path().to_path_buf(), SearchMode::MissingValues, 2)
+        .with_limit(None);
+    let result_all = run_analysis(&config_all).expect("Analysis failed");
+    assert_eq!(result_all.total_matches, 50);
+    assert_eq!(result_all.sample_occurrences.len(), 50); // all 50 collected!
+}

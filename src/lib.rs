@@ -36,6 +36,7 @@ pub struct AnalysisConfig {
     pub mode: SearchMode,
     pub workers: usize,
     pub batch_size: usize,
+    pub limit: Option<usize>,
 }
 
 impl AnalysisConfig {
@@ -45,7 +46,13 @@ impl AnalysisConfig {
             mode,
             workers: workers.max(1),
             batch_size: 4096,
+            limit: Some(15),
         }
+    }
+
+    pub fn with_limit(mut self, limit: Option<usize>) -> Self {
+        self.limit = limit;
+        self
     }
 }
 
@@ -94,7 +101,10 @@ pub struct AgentReport {
     pub execution_time_ms: f64,
     pub summary: AgentSummary,
     pub columns: Vec<AgentColumnInfo>,
-    pub sample_occurrences: Vec<Occurrence>,
+    pub occurrences_count: usize,
+    pub occurrences: Vec<Occurrence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_occurrences: Option<Vec<Occurrence>>,
 }
 
 #[derive(Debug, Clone)]
@@ -164,7 +174,9 @@ impl AnalysisResult {
                 affected_percentage_rows: (row_pct * 100.0).round() / 100.0,
             },
             columns,
-            sample_occurrences: self.sample_occurrences.clone(),
+            occurrences_count: self.sample_occurrences.len(),
+            occurrences: self.sample_occurrences.clone(),
+            sample_occurrences: Some(self.sample_occurrences.clone()),
         }
     }
 
@@ -235,7 +247,7 @@ struct BatchStats {
 }
 
 impl BatchStats {
-    fn combine(mut self, mut other: Self) -> Self {
+    fn combine(mut self, mut other: Self, limit: Option<usize>) -> Self {
         if self.error.is_none() {
             self.error = other.error.take();
         }
@@ -251,8 +263,10 @@ impl BatchStats {
         }
 
         self.samples.extend(other.samples);
-        self.samples.sort_by_key(|s| (s.row, s.col_idx));
-        self.samples.truncate(15);
+        if let Some(lim) = limit {
+            self.samples.sort_by_key(|s| (s.row, s.col_idx));
+            self.samples.truncate(lim);
+        }
         self
     }
 }
@@ -326,9 +340,10 @@ pub fn run_analysis(config: &AnalysisConfig) -> Result<AnalysisResult, Box<dyn s
         .build()?;
 
     let mode = config.mode.clone();
+    let limit = config.limit;
     let headers_arc = std::sync::Arc::new(headers.clone());
 
-    let final_stats = thread_pool.install(|| {
+    let mut final_stats = thread_pool.install(|| {
         rx.into_iter()
             .par_bridge()
             .map(|batch_res| match batch_res {
@@ -373,7 +388,12 @@ pub fn run_analysis(config: &AnalysisConfig) -> Result<AnalysisResult, Box<dyn s
                                 stats.total_matches += 1;
                                 stats.col_counts[i] += 1;
 
-                                if stats.samples.len() < 15 {
+                                let should_record = match limit {
+                                    Some(lim) => stats.samples.len() < lim,
+                                    None => true,
+                                };
+
+                                if should_record {
                                     let col_name = if i < headers_arc.len() {
                                         headers_arc[i].clone()
                                     } else {
@@ -401,8 +421,13 @@ pub fn run_analysis(config: &AnalysisConfig) -> Result<AnalysisResult, Box<dyn s
                     ..Default::default()
                 },
             })
-            .reduce(BatchStats::default, BatchStats::combine)
+            .reduce(BatchStats::default, move |a, b| a.combine(b, limit))
     });
+
+    final_stats.samples.sort_by_key(|s| (s.row, s.col_idx));
+    if let Some(lim) = limit {
+        final_stats.samples.truncate(lim);
+    }
 
     if let Err(e) = producer.join() {
         return Err(format!("Producer thread panicked: {:?}", e).into());
@@ -557,10 +582,19 @@ pub fn format_report(result: &AnalysisResult) -> String {
 
     if !result.sample_occurrences.is_empty() {
         out.push_str("----------------------------------------------------------------------\n");
-        out.push_str(&format!(
-            "  Sample Occurrences (showing up to {}):\n",
-            result.sample_occurrences.len()
-        ));
+        if result.sample_occurrences.len() >= result.total_matches {
+            out.push_str(&format!(
+                "  All Occurrences ({}/{}):\n",
+                result.sample_occurrences.len(),
+                result.total_matches
+            ));
+        } else {
+            out.push_str(&format!(
+                "  Sample Occurrences (showing {} of {}, use --all to view all):\n",
+                result.sample_occurrences.len(),
+                format_number(result.total_matches)
+            ));
+        }
         for occ in &result.sample_occurrences {
             out.push_str(&format!(
                 "    - Row {:<6} | Column {:<2} (\"{}\") -> {}\n",

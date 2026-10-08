@@ -73,6 +73,20 @@ Add `--json` to output machine-readable, structured JSON directly to stdout:
 searchup --load data.csv --search missing_values --workers 4 --json
 ```
 
+### 5. Dump ALL Missing Values (or Custom Limit)
+By default, `searchup` aggregates all statistics across the entire file and previews the first 15 occurrences. To output **every single occurrence** without truncating:
+
+```bash
+# Dump all missing values (terminal or JSON)
+searchup --load data.csv --search missing_values --all
+
+# Combine with --json to get full row-by-row data for an agent
+searchup --load data.csv --search missing_values --workers 4 --all --json
+
+# Or set a custom occurrence limit
+searchup --load data.csv --search missing_values --limit 100
+```
+
 ---
 
 ## 📊 Sample Output
@@ -177,6 +191,8 @@ Options:
   -w, --workers <NUM>            Number of parallel worker threads (defaults to available CPU cores)
       --batch-size <BATCH_SIZE>  Batch size for worker chunks [default: 4096]
       --json                     Dump structured JSON output for AI agents and automation
+      --limit <LIMIT>            Maximum occurrences to output in detail (default: 15; use 0 for unlimited)
+  -a, --all                      Output ALL occurrences without truncating
   -h, --help                     Print help
   -V, --version                  Print version
 ```

@@ -31,6 +31,14 @@ struct Args {
     /// Dump structured JSON output for AI agents and automation
     #[arg(long)]
     json: bool,
+
+    /// Maximum occurrences to output in detail (default: 15; use 0 for unlimited)
+    #[arg(long, default_value_t = 15)]
+    limit: usize,
+
+    /// Output ALL occurrences without truncating
+    #[arg(short, long)]
+    all: bool,
 }
 
 fn main() {
@@ -63,6 +71,11 @@ fn main() {
 
     let mut config = AnalysisConfig::new(args.load, mode, workers);
     config.batch_size = args.batch_size;
+    config.limit = if args.all || args.limit == 0 {
+        None
+    } else {
+        Some(args.limit)
+    };
 
     match run_analysis(&config) {
         Ok(result) => {
