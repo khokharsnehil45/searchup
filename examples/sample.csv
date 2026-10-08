@@ -1,0 +1,9 @@
+id,name,age,email,country,score
+1,Alice,30,alice@example.com,USA,95.5
+2,,25,bob@example.com,Canada,
+3,Charlie,NA,,UK,88.0
+4,David,42,david@example.com,null,72.4
+5,Eva,,eva@example.com,Germany,None
+6,Frank,36,,France,91.2
+7,Grace,28,grace@example.com,N/A,85.0
+8,Hannah,31,hannah@example.com,USA,?

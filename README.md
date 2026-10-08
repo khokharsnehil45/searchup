@@ -1,0 +1,150 @@
+# 🔍 SearchUp
+
+**A high-performance, parallel CSV analyzer built with Rust.**
+
+`searchup` scans large CSV files at blazing speeds to detect missing values, calculate data completeness metrics, and inspect datasets using multi-threaded parallel workers.
+
+[![Rust](https://img.shields.io/badge/rust-edition%202024-orange.svg)](https://www.rust-lang.org/)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE)
+[![Build Status](https://img.shields.io/badge/tests-passing-brightgreen.svg)]()
+
+---
+
+## ⚡ Features
+
+- **Parallel Processing Engine**: Uses [Rayon](https://github.com/rayon-rs/rayon) to process CSV record batches concurrently across configurable worker threads.
+- **Memory-Efficient Streaming**: Pipelines disk I/O and processing through a bounded batch channel. Safely analyzes multi-gigabyte files with low, predictable memory usage.
+- **Zero-Allocation Byte Scanning**: Inspects fields directly as raw byte slices, avoiding redundant UTF-8 string allocations for every cell.
+- **Smart Missing Value Detection**: Detects empty cells, whitespace-only fields, omitted columns, and common missing value indicators (`NA`, `N/A`, `NULL`, `None`, `NaN`, `?`).
+- **Flexible Search Querying**: Supports both `--search missing values` and `--search missing_values`, as well as custom text pattern searching across columns.
+- **Detailed Terminal Reports**: Generates clear summaries with affected row counts, percentage completeness, column-by-column distribution bars, sample locations, and processing throughput metrics.
+
+---
+
+## 🚀 Quick Start
+
+### Installation
+
+Clone the repository and install using Cargo:
+
+```bash
+git clone https://github.com/khokharsnehil45/searchup.git
+cd searchup
+cargo install --path .
+```
+
+Or build the release binary directly:
+
+```bash
+cargo build --release
+# Executable will be in target/release/searchup
+```
+
+---
+
+## 💻 Usage
+
+### 1. Analyze Missing Values (Auto Workers)
+By default, `searchup` uses all available logical CPU cores:
+
+```bash
+searchup --load data.csv --search missing values
+```
+*(You can also use `--search missing_values` or `--search "missing values"`)*
+
+### 2. Specify Worker Count
+Set the number of parallel workers using the `--workers` / `-w` flag:
+
+```bash
+searchup --load data.csv --search missing_values --workers 4
+```
+
+### 3. Search for Custom Text Patterns
+Search across all columns for specific keywords or substrings:
+
+```bash
+searchup --load data.csv --search Canada --workers 4
+```
+
+---
+
+## 📊 Sample Output
+
+Running `searchup --load examples/sample.csv --search missing_values --workers 4`:
+
+```text
+======================================================================
+                        SEARCHUP CSV ANALYZER                         
+======================================================================
+  File:            examples/sample.csv
+  File Size:       284 bytes
+  Search Target:   Missing Values
+  Parallel Workers: 4
+  Data Rows:       8
+  Columns:         6
+  Total Cells:     48
+----------------------------------------------------------------------
+  Total Missing Values: 8 (16.67% of all cells)
+  Rows Affected:       7 (87.50% of data rows)
+----------------------------------------------------------------------
+  Breakdown by Column (Missing Values):
+    #    Column Name   Missing Values Percentage  Distribution
+    1    id                         0      0.00%  [               ]
+    2    name                       1     12.50%  [==             ]
+    3    age                        2     25.00%  [====           ]
+    4    email                      2     25.00%  [====           ]
+    5    country                    2     25.00%  [====           ]
+    6    score                      1     12.50%  [==             ]
+----------------------------------------------------------------------
+  Sample Occurrences (showing up to 8):
+    - Row 2      | Column 2  ("name") -> <empty>
+    - Row 2      | Column 6  ("score") -> <empty>
+    - Row 3      | Column 3  ("age") -> NA
+    - Row 3      | Column 4  ("email") -> <empty>
+    - Row 4      | Column 5  ("country") -> null
+    - Row 5      | Column 3  ("age") -> <empty>
+    - Row 5      | Column 6  ("score") -> None
+    - Row 6      | Column 4  ("email") -> <empty>
+======================================================================
+  Execution Time:  1.12ms (7142.9 rows/sec, 42857.1 cells/sec)
+======================================================================
+```
+
+---
+
+## 🛠️ CLI Options
+
+```text
+A fast CLI tool that utilizes parallel worker threads to analyze CSV files, detect missing values, and inspect data completeness.
+
+Usage: searchup [OPTIONS] --load <FILE>
+
+Options:
+  -l, --load <FILE>              Path to the CSV file to analyze
+  -s, --search <TARGET>...       Target to search (e.g. 'missing_values', 'missing values', or text query)
+  -w, --workers <NUM>            Number of parallel worker threads (defaults to available CPU cores)
+      --batch-size <BATCH_SIZE>  Batch size for worker chunks [default: 4096]
+  -h, --help                     Print help
+  -V, --version                  Print version
+```
+
+---
+
+## 🧪 Running Tests
+
+The test suite covers unit tests, missing value accuracy, text searches, and multi-worker consistency:
+
+```bash
+cargo test
+```
+
+---
+
+## 📄 License
+
+Dual-licensed under either:
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
