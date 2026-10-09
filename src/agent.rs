@@ -315,7 +315,7 @@ pub async fn run_agent_turn(
         let mut req_builder = client
             .post(&url)
             .header("Content-Type", "application/json")
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(300))
             .json(&request);
 
         if let Some(key) = &config.api_key {
