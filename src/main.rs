@@ -134,23 +134,40 @@ async fn main() {
             .unwrap_or(4);
         let workers = args.workers.unwrap_or(default_workers);
 
-        let api_base = args
-            .api_base
-            .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
-            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
-
         let api_key = args
             .api_key
+            .or_else(|| std::env::var("NVIDIA_API_KEY").ok())
             .or_else(|| std::env::var("OPENAI_API_KEY").ok())
             .or_else(|| std::env::var("GROQ_API_KEY").ok())
             .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok());
+
+        let is_nvidia = api_key
+            .as_ref()
+            .map_or(false, |k| k.starts_with("nvapi-"))
+            || std::env::var("NVIDIA_API_KEY").is_ok();
+
+        let api_base = if let Some(base) = args.api_base {
+            base
+        } else if let Ok(base) = std::env::var("OPENAI_BASE_URL") {
+            base
+        } else if is_nvidia {
+            "https://integrate.api.nvidia.com/v1".to_string()
+        } else {
+            "https://api.openai.com/v1".to_string()
+        };
+
+        let model = if args.model == "gpt-4o-mini" && is_nvidia {
+            "meta/llama-3.3-70b-instruct".to_string()
+        } else {
+            args.model
+        };
 
         if api_key.is_none() && api_base.contains("api.openai.com") {
             println!(
                 "  {} {}\n  {}\n",
                 "ℹ Note:".bright_yellow().bold(),
                 "No API key detected for OpenAI.".white(),
-                "Tip: Set OPENAI_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY, or run with local Ollama:\n    searchup --load <file> --agent --api-base http://localhost:11434/v1 --model llama3.1".dimmed()
+                "Tip: Set NVIDIA_API_KEY, OPENAI_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY, or run with local Ollama:\n    searchup --load <file> --agent --api-base http://localhost:11434/v1 --model llama3.1".dimmed()
             );
         }
 
@@ -170,7 +187,7 @@ async fn main() {
             file_path: args.load,
             api_key,
             api_base,
-            model: args.model,
+            model,
             max_turns: 12,
             workers,
         };

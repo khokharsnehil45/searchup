@@ -155,6 +155,7 @@ searchup> exit
 ```
 
 Supported API providers:
+- **NVIDIA NIM** (`NVIDIA_API_KEY`, auto-routed to `meta/llama-3.3-70b-instruct`)
 - **Local Ollama** (offline & free, default: `--api-base http://localhost:11434/v1 --model llama3.1`)
 - **OpenAI** (`OPENAI_API_KEY`)
 - **Groq** (`GROQ_API_KEY`, `--model llama-3.3-70b-versatile`)
