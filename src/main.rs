@@ -81,9 +81,28 @@ struct Args {
     /// Disable colored terminal output
     #[arg(long)]
     no_color: bool,
+
+    // === Agent Harness Arguments ===
+
+    /// Run autonomous agent mode with optional prompt instruction (or enter interactive mode)
+    #[arg(long, num_args(0..=1), value_name = "PROMPT")]
+    agent: Option<Option<String>>,
+
+    /// Model to use for the agent (default: 'gpt-4o-mini', or 'llama3.1', 'deepseek-chat')
+    #[arg(long, default_value = "gpt-4o-mini", value_name = "MODEL")]
+    model: String,
+
+    /// API Base URL (e.g. 'https://api.openai.com/v1' or 'http://localhost:11434/v1')
+    #[arg(long, value_name = "URL")]
+    api_base: Option<String>,
+
+    /// API key for the LLM provider (or use OPENAI_API_KEY environment variable)
+    #[arg(long, value_name = "KEY")]
+    api_key: Option<String>,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
     if args.no_color {
@@ -100,6 +119,67 @@ fn main() {
     if !args.load.exists() {
         eprintln!("{}: File '{}' does not exist.", "Error".bright_red().bold(), args.load.display());
         process::exit(1);
+    }
+
+    // Check if agent mode was requested
+    let is_agent = args.agent.is_some()
+        || args.search.as_ref().map_or(false, |s| {
+            let q = s.first().map(|x| x.to_lowercase()).unwrap_or_default();
+            q == "agent" || q == "chat"
+        });
+
+    if is_agent {
+        let default_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let workers = args.workers.unwrap_or(default_workers);
+
+        let api_base = args
+            .api_base
+            .or_else(|| std::env::var("OPENAI_BASE_URL").ok())
+            .unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+
+        let api_key = args
+            .api_key
+            .or_else(|| std::env::var("OPENAI_API_KEY").ok())
+            .or_else(|| std::env::var("GROQ_API_KEY").ok())
+            .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok());
+
+        if api_key.is_none() && api_base.contains("api.openai.com") {
+            println!(
+                "  {} {}\n  {}\n",
+                "ℹ Note:".bright_yellow().bold(),
+                "No API key detected for OpenAI.".white(),
+                "Tip: Set OPENAI_API_KEY, GROQ_API_KEY, DEEPSEEK_API_KEY, or run with local Ollama:\n    searchup --load <file> --agent --api-base http://localhost:11434/v1 --model llama3.1".dimmed()
+            );
+        }
+
+        let prompt = if let Some(Some(p)) = &args.agent {
+            Some(p.clone())
+        } else if let Some(search_parts) = &args.search {
+            if search_parts.len() > 1 {
+                Some(search_parts[1..].join(" "))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let agent_config = searchup::agent::AgentConfig {
+            file_path: args.load,
+            api_key,
+            api_base,
+            model: args.model,
+            max_turns: 12,
+            workers,
+        };
+
+        if let Err(e) = searchup::agent::run_agent_session(agent_config, prompt).await {
+            eprintln!("{}: {}", "Agent error".bright_red().bold(), e);
+            process::exit(1);
+        }
+        return;
     }
 
     // Check if profiling mode was requested

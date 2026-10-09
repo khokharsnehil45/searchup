@@ -1,3 +1,5 @@
+pub mod agent;
+
 use colored::Colorize;
 use rayon::prelude::*;
 use serde::Serialize;

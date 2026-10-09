@@ -19,7 +19,7 @@
 - **Zero-Allocation Byte Scanning**: Inspects fields directly as raw byte slices, avoiding redundant UTF-8 string allocations for every cell.
 - **Smart Missing Value Detection**: Detects empty cells, whitespace-only fields, omitted columns, and common missing value indicators (`NA`, `N/A`, `NULL`, `None`, `NaN`, `?`).
 - **Missing Value Imputation Engine**: Repair missing cells with `--fill`, targeting coordinates `--coord 5,age` and applying strategies (`literal`, `mean`, `median`, `mode`).
-- **Flexible Search Querying**: Supports `--search missing_values`, `--search outliers`, and custom text pattern searching across columns.
+- **Autonomous AI Agent Harness**: Autonomous reasoning engine (`--agent`) that inspects schemas, plans repair actions, calls tools, and imputes data autonomously via Ollama (local/free), OpenAI, Groq, or DeepSeek.
 - **Detailed Terminal Reports & JSON**: Vibrant ANSI-colored terminal reports with progress bars, type highlights, and severity indicators (supports `--no-color` / `NO_COLOR`), or agent-ready structured JSON (`--json`).
 
 ---
@@ -135,6 +135,31 @@ searchup --load data.csv --fill --coord 5,age --val mean --in-place
 # 5. Agent confirmation via structured JSON
 searchup --load data.csv --fill --coord 5,score --val mean --out cleaned.csv --json
 ```
+
+### 9. 🤖 Autonomous AI Agent Harness (`--agent`)
+Run `searchup` with an autonomous reasoning harness that automatically inspects schemas, identifies missing data or outliers, and carries out data repair strategies based on natural language instructions:
+
+```bash
+# 1. Run a single instruction autonomously (OpenAI, DeepSeek, Groq, or local Ollama)
+searchup --load data.csv --agent "Analyze missing values and impute age using mean"
+
+# 2. Run completely offline and free with local Ollama!
+searchup --load data.csv --agent "Profile this dataset and fix missing values" \
+  --api-base http://localhost:11434/v1 --model llama3.1
+
+# 3. Interactive Copilot Chat mode
+searchup --load data.csv --agent
+searchup> Check for outliers in salary
+searchup> Impute missing department values with mode
+searchup> exit
+```
+
+Supported API providers:
+- **Local Ollama** (offline & free, default: `--api-base http://localhost:11434/v1 --model llama3.1`)
+- **OpenAI** (`OPENAI_API_KEY`)
+- **Groq** (`GROQ_API_KEY`, `--model llama-3.3-70b-versatile`)
+- **DeepSeek** (`DEEPSEEK_API_KEY`, `--model deepseek-chat`)
+- Any OpenAI-compatible tool calling endpoint.
 
 ---
 
@@ -253,6 +278,12 @@ Fill / Imputation Options:
   -o, --out <FILE>               Destination file to write modified CSV
       --in-place                 Overwrite loaded CSV in-place safely via atomic temporary file
       --no-color                 Disable colored terminal output
+
+Agent Harness Options:
+      --agent [<PROMPT>]         Run autonomous agent mode with prompt (or interactive mode)
+      --model <MODEL>            Model name [default: gpt-4o-mini]
+      --api-base <URL>           API Base URL (e.g. 'http://localhost:11434/v1' for Ollama)
+      --api-key <KEY>            API key (or use OPENAI_API_KEY / GROQ_API_KEY)
   -h, --help                     Print help
   -V, --version                  Print version
 ```
