@@ -14,10 +14,13 @@
 
 - **Parallel Processing Engine**: Uses [Rayon](https://github.com/rayon-rs/rayon) to process CSV record batches concurrently across configurable worker threads.
 - **Memory-Efficient Streaming**: Pipelines disk I/O and processing through a bounded batch channel. Safely analyzes multi-gigabyte files with low, predictable memory usage.
+- **Automatic Dataset Profiling & Type Inference**: Automatically infers column data types (`Integer`, `Float`, `Boolean`, `DateTime`, `String`), counts nulls/uniques, and computes rich statistical summaries (`min`, `max`, `mean`, `median`, `std_dev`, IQR, top frequencies).
+- **Outlier Detection via IQR**: Identifies numeric anomalies using Tukey's robust IQR rule with configurable worker parallelism (`--search outliers`).
 - **Zero-Allocation Byte Scanning**: Inspects fields directly as raw byte slices, avoiding redundant UTF-8 string allocations for every cell.
 - **Smart Missing Value Detection**: Detects empty cells, whitespace-only fields, omitted columns, and common missing value indicators (`NA`, `N/A`, `NULL`, `None`, `NaN`, `?`).
-- **Flexible Search Querying**: Supports both `--search missing values` and `--search missing_values`, as well as custom text pattern searching across columns.
-- **Detailed Terminal Reports**: Generates clear summaries with affected row counts, percentage completeness, column-by-column distribution bars, sample locations, and processing throughput metrics.
+- **Missing Value Imputation Engine**: Repair missing cells with `--fill`, targeting coordinates `--coord 5,age` and applying strategies (`literal`, `mean`, `median`, `mode`).
+- **Flexible Search Querying**: Supports `--search missing_values`, `--search outliers`, and custom text pattern searching across columns.
+- **Detailed Terminal Reports & JSON**: Generates clear summaries, distribution bars, sample locations, or agent-ready structured JSON.
 
 ---
 
@@ -66,14 +69,36 @@ Search across all columns for specific keywords or substrings:
 searchup --load data.csv --search Canada --workers 4
 ```
 
-### 4. Structured JSON Output (For AI Agents & Automation)
+### 4. Automatic Dataset Profiler (`--profile`)
+Generate a comprehensive schema profile with inferred types (`Integer`, `Float`, `Boolean`, `DateTime`, `String`), null percentages, cardinalities, and statistical distributions:
+
+```bash
+# Formatted terminal profile report table
+searchup --load data.csv --profile
+
+# Full JSON schema & statistics for an AI agent
+searchup --load data.csv --profile --json
+```
+
+### 5. Outlier Detection (`--search outliers`)
+Detect numeric outliers across all numeric columns using Tukey's robust interquartile range (IQR) rule:
+
+```bash
+# Detect outliers with parallel workers
+searchup --load data.csv --search outliers --workers 4
+
+# Dump all outliers in structured JSON
+searchup --load data.csv --search outliers --all --json
+```
+
+### 6. Structured JSON Output (For AI Agents & Automation)
 Add `--json` to output machine-readable, structured JSON directly to stdout:
 
 ```bash
 searchup --load data.csv --search missing_values --workers 4 --json
 ```
 
-### 5. Dump ALL Missing Values (or Custom Limit)
+### 7. Dump ALL Missing Values (or Custom Limit)
 By default, `searchup` aggregates all statistics across the entire file and previews the first 15 occurrences. To output **every single occurrence** without truncating:
 
 ```bash
@@ -87,7 +112,7 @@ searchup --load data.csv --search missing_values --workers 4 --all --json
 searchup --load data.csv --search missing_values --limit 100
 ```
 
-### 6. Missing Value Imputation / Filling (`--fill`)
+### 8. Missing Value Imputation / Filling (`--fill`)
 Clean and repair missing values manually or dynamically with statistical strategies:
 
 ```bash
@@ -211,7 +236,8 @@ Usage: searchup [OPTIONS] --load <FILE>
 
 Options:
   -l, --load <FILE>              Path to the CSV file to analyze or modify
-  -s, --search <TARGET>...       Target to search (e.g. 'missing_values', 'missing values', or text query)
+  -s, --search <TARGET>...       Target to search (e.g. 'missing_values', 'outliers', or text query)
+      --profile                  Generate comprehensive data profile with type inference and column stats
   -w, --workers <NUM>            Number of parallel worker threads (defaults to available CPU cores)
       --batch-size <BATCH_SIZE>  Batch size for worker chunks [default: 4096]
       --json                     Dump structured JSON output for AI agents and automation

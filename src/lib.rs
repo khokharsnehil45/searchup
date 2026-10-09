@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 use serde::Serialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum SearchMode {
     MissingValues,
+    Outliers,
     Text(String),
 }
 
@@ -18,6 +19,8 @@ impl SearchMode {
         let normalized = input.trim().to_lowercase().replace(['-', ' '], "_");
         if normalized == "missing_values" || normalized == "missing" || normalized == "missing_value" {
             SearchMode::MissingValues
+        } else if normalized == "outliers" || normalized == "outlier" || normalized == "anomalies" {
+            SearchMode::Outliers
         } else {
             SearchMode::Text(input.trim().to_string())
         }
@@ -26,6 +29,7 @@ impl SearchMode {
     pub fn display_name(&self) -> String {
         match self {
             SearchMode::MissingValues => "Missing Values".to_string(),
+            SearchMode::Outliers => "Numeric Outliers (IQR)".to_string(),
             SearchMode::Text(pattern) => format!("Text Pattern: \"{pattern}\""),
         }
     }
@@ -161,6 +165,7 @@ impl AnalysisResult {
             file_size_bytes: self.file_size_bytes,
             search_target: match &self.search_mode {
                 SearchMode::MissingValues => "missing_values".to_string(),
+                SearchMode::Outliers => "outliers".to_string(),
                 SearchMode::Text(query) => query.clone(),
             },
             workers_used: self.workers_used,
@@ -572,6 +577,657 @@ pub fn format_fill_report(result: &FillResult) -> String {
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum InferredType {
+    Integer,
+    Float,
+    Boolean,
+    DateTime,
+    String,
+    Null,
+}
+
+impl InferredType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InferredType::Integer => "Integer",
+            InferredType::Float => "Float",
+            InferredType::Boolean => "Boolean",
+            InferredType::DateTime => "DateTime",
+            InferredType::String => "String",
+            InferredType::Null => "Null",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct NumericStats {
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+    pub std_dev: f64,
+    pub median: f64,
+    pub q1: f64,
+    pub q3: f64,
+    pub iqr: f64,
+    pub lower_outlier_bound: f64,
+    pub upper_outlier_bound: f64,
+    pub outlier_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StringStats {
+    pub min_length: usize,
+    pub max_length: usize,
+    pub avg_length: f64,
+    pub top_values: Vec<(String, usize)>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ColumnProfile {
+    pub index: usize,
+    pub name: String,
+    pub inferred_type: InferredType,
+    pub total_rows: usize,
+    pub non_null_count: usize,
+    pub null_count: usize,
+    pub null_percentage: f64,
+    pub unique_count: usize,
+    pub unique_percentage: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numeric_stats: Option<NumericStats>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub string_stats: Option<StringStats>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileReport {
+    pub file_path: String,
+    pub file_size_bytes: u64,
+    pub total_rows: usize,
+    pub total_columns: usize,
+    pub total_cells: usize,
+    pub execution_time_ms: f64,
+    pub workers_used: usize,
+    pub columns: Vec<ColumnProfile>,
+}
+
+impl ProfileReport {
+    pub fn to_json(&self, pretty: bool) -> Result<String, serde_json::Error> {
+        if pretty {
+            serde_json::to_string_pretty(self)
+        } else {
+            serde_json::to_string(self)
+        }
+    }
+}
+
+pub fn percentile(sorted: &[f64], p: f64) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    if sorted.len() == 1 {
+        return sorted[0];
+    }
+    let rank = p * (sorted.len() - 1) as f64;
+    let lower_idx = rank.floor() as usize;
+    let upper_idx = rank.ceil() as usize;
+    if lower_idx == upper_idx {
+        sorted[lower_idx]
+    } else {
+        let weight = rank - lower_idx as f64;
+        sorted[lower_idx] * (1.0 - weight) + sorted[upper_idx] * weight
+    }
+}
+
+pub fn calculate_outlier_bounds(
+    file_path: &Path,
+    col_count: usize,
+) -> Result<HashMap<usize, (f64, f64)>, Box<dyn std::error::Error + Send + Sync>> {
+    let file = File::open(file_path)?;
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(BufReader::with_capacity(128 * 1024, file));
+
+    let mut column_numbers: Vec<Vec<f64>> = vec![Vec::new(); col_count];
+    let mut record = csv::ByteRecord::new();
+
+    while reader.read_byte_record(&mut record)? {
+        for i in 0..col_count.min(record.len()) {
+            let field = &record[i];
+            if !is_missing_value(field) {
+                if let Ok(s) = std::str::from_utf8(field) {
+                    if let Ok(num) = s.trim().parse::<f64>() {
+                        column_numbers[i].push(num);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut bounds = HashMap::new();
+    for (i, mut nums) in column_numbers.into_iter().enumerate() {
+        if nums.len() >= 4 {
+            nums.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            let q1 = percentile(&nums, 0.25);
+            let q3 = percentile(&nums, 0.75);
+            let iqr = q3 - q1;
+            let lower = q1 - 1.5 * iqr;
+            let upper = q3 + 1.5 * iqr;
+            bounds.insert(i, (lower, upper));
+        }
+    }
+
+    Ok(bounds)
+}
+
+pub fn is_date_or_datetime(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() == 10 && (bytes[4] == b'-' || bytes[4] == b'/') && (bytes[7] == b'-' || bytes[7] == b'/') {
+        let year_valid = bytes[0..4].iter().all(|b| b.is_ascii_digit());
+        let month_valid = bytes[5..7].iter().all(|b| b.is_ascii_digit());
+        let day_valid = bytes[8..10].iter().all(|b| b.is_ascii_digit());
+        return year_valid && month_valid && day_valid;
+    }
+    if bytes.len() >= 19
+        && (bytes[4] == b'-' || bytes[4] == b'/')
+        && (bytes[7] == b'-' || bytes[7] == b'/')
+        && (bytes[10] == b' ' || bytes[10] == b'T')
+        && bytes[13] == b':'
+        && bytes[16] == b':'
+    {
+        let y_ok = bytes[0..4].iter().all(|b| b.is_ascii_digit());
+        let m_ok = bytes[5..7].iter().all(|b| b.is_ascii_digit());
+        let d_ok = bytes[8..10].iter().all(|b| b.is_ascii_digit());
+        let h_ok = bytes[11..13].iter().all(|b| b.is_ascii_digit());
+        let min_ok = bytes[14..16].iter().all(|b| b.is_ascii_digit());
+        let sec_ok = bytes[17..19].iter().all(|b| b.is_ascii_digit());
+        return y_ok && m_ok && d_ok && h_ok && min_ok && sec_ok;
+    }
+    false
+}
+
+pub fn detect_value_type(val: &str) -> InferredType {
+    let trimmed = val.trim();
+    if is_missing_value(trimmed.as_bytes()) {
+        return InferredType::Null;
+    }
+    if trimmed.eq_ignore_ascii_case("true")
+        || trimmed.eq_ignore_ascii_case("false")
+        || trimmed.eq_ignore_ascii_case("yes")
+        || trimmed.eq_ignore_ascii_case("no")
+    {
+        return InferredType::Boolean;
+    }
+    if is_date_or_datetime(trimmed) {
+        return InferredType::DateTime;
+    }
+    if trimmed.parse::<i64>().is_ok() {
+        return InferredType::Integer;
+    }
+    if trimmed.parse::<f64>().is_ok() {
+        return InferredType::Float;
+    }
+    InferredType::String
+}
+
+#[derive(Clone)]
+struct ColumnAccumulator {
+    non_null_count: usize,
+    null_count: usize,
+    int_count: usize,
+    float_count: usize,
+    bool_count: usize,
+    date_count: usize,
+    string_count: usize,
+    min_len: usize,
+    max_len: usize,
+    sum_len: usize,
+    unique_set: HashSet<String>,
+    numbers: Vec<f64>,
+    freq: HashMap<String, usize>,
+}
+
+impl ColumnAccumulator {
+    fn new() -> Self {
+        Self {
+            non_null_count: 0,
+            null_count: 0,
+            int_count: 0,
+            float_count: 0,
+            bool_count: 0,
+            date_count: 0,
+            string_count: 0,
+            min_len: usize::MAX,
+            max_len: 0,
+            sum_len: 0,
+            unique_set: HashSet::new(),
+            numbers: Vec::new(),
+            freq: HashMap::new(),
+        }
+    }
+
+    fn combine(&mut self, other: Self) {
+        self.non_null_count += other.non_null_count;
+        self.null_count += other.null_count;
+        self.int_count += other.int_count;
+        self.float_count += other.float_count;
+        self.bool_count += other.bool_count;
+        self.date_count += other.date_count;
+        self.string_count += other.string_count;
+        self.min_len = self.min_len.min(other.min_len);
+        self.max_len = self.max_len.max(other.max_len);
+        self.sum_len += other.sum_len;
+
+        if self.unique_set.len() < 50_000 {
+            for val in other.unique_set {
+                if self.unique_set.len() >= 50_000 {
+                    break;
+                }
+                self.unique_set.insert(val);
+            }
+        }
+
+        self.numbers.extend(other.numbers);
+
+        for (k, v) in other.freq {
+            if self.freq.len() < 1_000 || self.freq.contains_key(&k) {
+                *self.freq.entry(k).or_insert(0) += v;
+            }
+        }
+    }
+}
+
+struct BatchProfileResult {
+    row_count: usize,
+    accumulators: Vec<ColumnAccumulator>,
+    error: Option<String>,
+}
+
+impl BatchProfileResult {
+    fn combine(mut self, mut other: Self) -> Self {
+        if self.error.is_none() {
+            self.error = other.error.take();
+        }
+        self.row_count += other.row_count;
+        if other.accumulators.len() > self.accumulators.len() {
+            self.accumulators.resize_with(other.accumulators.len(), ColumnAccumulator::new);
+        }
+        for (i, acc) in other.accumulators.into_iter().enumerate() {
+            if i < self.accumulators.len() {
+                self.accumulators[i].combine(acc);
+            } else {
+                self.accumulators.push(acc);
+            }
+        }
+        self
+    }
+}
+
+pub fn run_profile(
+    config: &AnalysisConfig,
+) -> Result<ProfileReport, Box<dyn std::error::Error + Send + Sync>> {
+    let start_time = Instant::now();
+    let file = File::open(&config.file_path)?;
+    let metadata = file.metadata()?;
+    let file_size_bytes = metadata.len();
+
+    let mut reader = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .flexible(true)
+        .from_reader(BufReader::with_capacity(128 * 1024, file));
+
+    let header_record = reader.byte_headers()?.clone();
+    let headers: Vec<String> = if header_record.is_empty() {
+        Vec::new()
+    } else {
+        header_record
+            .iter()
+            .enumerate()
+            .map(|(i, h)| {
+                let name = String::from_utf8_lossy(h).trim().to_string();
+                if name.is_empty() {
+                    format!("Column_{}", i + 1)
+                } else {
+                    name
+                }
+            })
+            .collect()
+    };
+
+    let col_count = headers.len();
+    let batch_size = config.batch_size;
+    let (tx, rx) = sync_channel::<Result<Vec<(usize, csv::ByteRecord)>, String>>(16);
+
+    let producer = std::thread::spawn(move || {
+        let mut current_batch = Vec::with_capacity(batch_size);
+        let mut row_idx = 2;
+        let mut record = csv::ByteRecord::new();
+
+        loop {
+            match reader.read_byte_record(&mut record) {
+                Ok(true) => {
+                    current_batch.push((row_idx, record.clone()));
+                    row_idx += 1;
+                    if current_batch.len() >= batch_size {
+                        if tx.send(Ok(current_batch)).is_err() {
+                            return;
+                        }
+                        current_batch = Vec::with_capacity(batch_size);
+                    }
+                }
+                Ok(false) => {
+                    if !current_batch.is_empty() {
+                        let _ = tx.send(Ok(current_batch));
+                    }
+                    break;
+                }
+                Err(err) => {
+                    let _ = tx.send(Err(format!("CSV read error at row {row_idx}: {err}")));
+                    return;
+                }
+            }
+        }
+    });
+
+    let thread_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(config.workers)
+        .build()?;
+
+    let final_profile = thread_pool.install(|| {
+        rx.into_iter()
+            .par_bridge()
+            .map(|batch_res| match batch_res {
+                Ok(batch) => {
+                    let mut accumulators = (0..col_count)
+                        .map(|_| ColumnAccumulator::new())
+                        .collect::<Vec<_>>();
+                    let row_count = batch.len();
+
+                    for (_row_idx, record) in batch {
+                        for i in 0..col_count {
+                            if i < record.len() {
+                                let field = &record[i];
+                                if is_missing_value(field) {
+                                    accumulators[i].null_count += 1;
+                                } else {
+                                    accumulators[i].non_null_count += 1;
+                                    let s = String::from_utf8_lossy(field).trim().to_string();
+                                    let len = s.len();
+                                    if len < accumulators[i].min_len {
+                                        accumulators[i].min_len = len;
+                                    }
+                                    if len > accumulators[i].max_len {
+                                        accumulators[i].max_len = len;
+                                    }
+                                    accumulators[i].sum_len += len;
+
+                                    if accumulators[i].unique_set.len() < 50_000 {
+                                        accumulators[i].unique_set.insert(s.clone());
+                                    }
+                                    *accumulators[i].freq.entry(s.clone()).or_insert(0) += 1;
+
+                                    match detect_value_type(&s) {
+                                        InferredType::Integer => {
+                                            accumulators[i].int_count += 1;
+                                            if let Ok(n) = s.parse::<f64>() {
+                                                accumulators[i].numbers.push(n);
+                                            }
+                                        }
+                                        InferredType::Float => {
+                                            accumulators[i].float_count += 1;
+                                            if let Ok(n) = s.parse::<f64>() {
+                                                accumulators[i].numbers.push(n);
+                                            }
+                                        }
+                                        InferredType::Boolean => {
+                                            accumulators[i].bool_count += 1;
+                                        }
+                                        InferredType::DateTime => {
+                                            accumulators[i].date_count += 1;
+                                        }
+                                        _ => {
+                                            accumulators[i].string_count += 1;
+                                        }
+                                    }
+                                }
+                            } else {
+                                accumulators[i].null_count += 1;
+                            }
+                        }
+                    }
+
+                    BatchProfileResult {
+                        row_count,
+                        accumulators,
+                        error: None,
+                    }
+                }
+                Err(err) => BatchProfileResult {
+                    row_count: 0,
+                    accumulators: (0..col_count).map(|_| ColumnAccumulator::new()).collect(),
+                    error: Some(err),
+                },
+            })
+            .reduce(
+                || BatchProfileResult {
+                    row_count: 0,
+                    accumulators: (0..col_count).map(|_| ColumnAccumulator::new()).collect(),
+                    error: None,
+                },
+                BatchProfileResult::combine,
+            )
+    });
+
+    if let Err(e) = producer.join() {
+        return Err(format!("Producer thread panicked: {:?}", e).into());
+    }
+
+    if let Some(err_msg) = final_profile.error {
+        return Err(err_msg.into());
+    }
+
+    let total_rows = final_profile.row_count;
+    let total_cells = total_rows * col_count;
+
+    let columns: Vec<ColumnProfile> = (0..col_count)
+        .into_par_iter()
+        .map(|i| {
+            let acc = &final_profile.accumulators[i];
+            let name = headers[i].clone();
+
+            let inferred_type = if acc.non_null_count == 0 {
+                InferredType::Null
+            } else if acc.bool_count == acc.non_null_count {
+                InferredType::Boolean
+            } else if acc.date_count == acc.non_null_count {
+                InferredType::DateTime
+            } else if acc.int_count == acc.non_null_count {
+                InferredType::Integer
+            } else if (acc.int_count + acc.float_count) == acc.non_null_count {
+                InferredType::Float
+            } else {
+                InferredType::String
+            };
+
+            let null_pct = if total_rows > 0 {
+                (acc.null_count as f64 / total_rows as f64) * 100.0
+            } else {
+                0.0
+            };
+            let unique_pct = if total_rows > 0 {
+                (acc.unique_set.len() as f64 / total_rows as f64) * 100.0
+            } else {
+                0.0
+            };
+
+            let numeric_stats = if (inferred_type == InferredType::Integer || inferred_type == InferredType::Float)
+                && !acc.numbers.is_empty()
+            {
+                let mut sorted = acc.numbers.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                let min = sorted[0];
+                let max = sorted[sorted.len() - 1];
+                let sum: f64 = sorted.iter().sum();
+                let mean = sum / sorted.len() as f64;
+                let var: f64 =
+                    sorted.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / sorted.len() as f64;
+                let std_dev = var.sqrt();
+                let median = percentile(&sorted, 0.50);
+                let q1 = percentile(&sorted, 0.25);
+                let q3 = percentile(&sorted, 0.75);
+                let iqr = q3 - q1;
+                let lower_bound = q1 - 1.5 * iqr;
+                let upper_bound = q3 + 1.5 * iqr;
+                let outlier_count = sorted
+                    .iter()
+                    .filter(|&&x| x < lower_bound || x > upper_bound)
+                    .count();
+
+                Some(NumericStats {
+                    min: (min * 100.0).round() / 100.0,
+                    max: (max * 100.0).round() / 100.0,
+                    mean: (mean * 100.0).round() / 100.0,
+                    std_dev: (std_dev * 100.0).round() / 100.0,
+                    median: (median * 100.0).round() / 100.0,
+                    q1: (q1 * 100.0).round() / 100.0,
+                    q3: (q3 * 100.0).round() / 100.0,
+                    iqr: (iqr * 100.0).round() / 100.0,
+                    lower_outlier_bound: (lower_bound * 100.0).round() / 100.0,
+                    upper_outlier_bound: (upper_bound * 100.0).round() / 100.0,
+                    outlier_count,
+                })
+            } else {
+                None
+            };
+
+            let string_stats = if inferred_type == InferredType::String
+                || inferred_type == InferredType::Boolean
+                || inferred_type == InferredType::DateTime
+            {
+                let avg_len = if acc.non_null_count > 0 {
+                    acc.sum_len as f64 / acc.non_null_count as f64
+                } else {
+                    0.0
+                };
+                let mut freq_vec: Vec<(String, usize)> = acc.freq.clone().into_iter().collect();
+                freq_vec.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                freq_vec.truncate(3);
+
+                Some(StringStats {
+                    min_length: if acc.min_len == usize::MAX {
+                        0
+                    } else {
+                        acc.min_len
+                    },
+                    max_length: acc.max_len,
+                    avg_length: (avg_len * 10.0).round() / 10.0,
+                    top_values: freq_vec,
+                })
+            } else {
+                None
+            };
+
+            ColumnProfile {
+                index: i + 1,
+                name,
+                inferred_type,
+                total_rows,
+                non_null_count: acc.non_null_count,
+                null_count: acc.null_count,
+                null_percentage: (null_pct * 100.0).round() / 100.0,
+                unique_count: acc.unique_set.len(),
+                unique_percentage: (unique_pct * 100.0).round() / 100.0,
+                numeric_stats,
+                string_stats,
+            }
+        })
+        .collect();
+
+    let duration = start_time.elapsed();
+
+    Ok(ProfileReport {
+        file_path: config.file_path.display().to_string(),
+        file_size_bytes,
+        total_rows,
+        total_columns: col_count,
+        total_cells,
+        execution_time_ms: (duration.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
+        workers_used: config.workers,
+        columns,
+    })
+}
+
+pub fn format_profile_report(report: &ProfileReport) -> String {
+    let mut out = String::new();
+    out.push_str("========================================================================================================\n");
+    out.push_str("                                      SEARCHUP DATASET PROFILER                                         \n");
+    out.push_str("========================================================================================================\n");
+    out.push_str(&format!("  File:            {}\n", report.file_path));
+    out.push_str(&format!("  File Size:       {}\n", format_size(report.file_size_bytes)));
+    out.push_str(&format!("  Data Rows:       {}\n", format_number(report.total_rows)));
+    out.push_str(&format!("  Columns:         {}\n", report.total_columns));
+    out.push_str(&format!("  Total Cells:     {}\n", format_number(report.total_cells)));
+    out.push_str(&format!("  Workers:         {}\n", report.workers_used));
+    out.push_str("--------------------------------------------------------------------------------------------------------\n");
+    out.push_str("  #   Column Name      Type       Nulls     Null %   Uniques  Stats / Summary                           \n");
+    out.push_str("--------------------------------------------------------------------------------------------------------\n");
+
+    for col in &report.columns {
+        let stats_summary = if let Some(num) = &col.numeric_stats {
+            format!(
+                "min: {}, max: {}, mean: {}, med: {}, outliers: {}",
+                num.min, num.max, num.mean, num.median, num.outlier_count
+            )
+        } else if let Some(str_s) = &col.string_stats {
+            let top_str = str_s
+                .top_values
+                .iter()
+                .map(|(v, c)| format!("\"{}\" ({})", v, c))
+                .collect::<Vec<_>>()
+                .join(", ");
+            if top_str.is_empty() {
+                format!("len: [{}..{}]", str_s.min_length, str_s.max_length)
+            } else {
+                format!("len: [{}..{}], top: {}", str_s.min_length, str_s.max_length, top_str)
+            }
+        } else {
+            "-".to_string()
+        };
+
+        let col_name_display = if col.name.len() > 16 {
+            format!("{}...", &col.name[..13])
+        } else {
+            col.name.clone()
+        };
+
+        out.push_str(&format!(
+            "  {:<3} {:<16} {:<10} {:>9} {:>9.1}% {:>8}  {}\n",
+            col.index,
+            col_name_display,
+            col.inferred_type.as_str(),
+            format_number(col.null_count),
+            col.null_percentage,
+            format_number(col.unique_count),
+            stats_summary
+        ));
+    }
+
+    out.push_str("--------------------------------------------------------------------------------------------------------\n");
+    let rows_sec = if report.execution_time_ms > 0.0 {
+        (report.total_rows as f64 / (report.execution_time_ms / 1000.0)).round()
+    } else {
+        0.0
+    };
+    out.push_str(&format!(
+        "  Execution Time:  {:.2} ms ({:.0} rows/sec)\n",
+        report.execution_time_ms, rows_sec
+    ));
+    out.push_str("========================================================================================================\n");
+    out
+}
+
 pub fn trim_ascii_whitespace(mut bytes: &[u8]) -> &[u8] {
     while let Some((first, rest)) = bytes.split_first() {
         if first.is_ascii_whitespace() {
@@ -606,6 +1262,7 @@ pub fn is_missing_value(bytes: &[u8]) -> bool {
 pub fn field_matches(bytes: &[u8], mode: &SearchMode) -> bool {
     match mode {
         SearchMode::MissingValues => is_missing_value(bytes),
+        SearchMode::Outliers => false,
         SearchMode::Text(query) => {
             if let Ok(s) = std::str::from_utf8(bytes) {
                 s.to_lowercase().contains(&query.to_lowercase())
@@ -725,6 +1382,13 @@ pub fn run_analysis(config: &AnalysisConfig) -> Result<AnalysisResult, Box<dyn s
     let limit = config.limit;
     let headers_arc = std::sync::Arc::new(headers.clone());
 
+    let outlier_bounds = if matches!(config.mode, SearchMode::Outliers) {
+        calculate_outlier_bounds(&config.file_path, col_count)?
+    } else {
+        HashMap::new()
+    };
+    let outlier_bounds_arc = std::sync::Arc::new(outlier_bounds);
+
     let mut final_stats = thread_pool.install(|| {
         rx.into_iter()
             .par_bridge()
@@ -749,12 +1413,47 @@ pub fn run_analysis(config: &AnalysisConfig) -> Result<AnalysisResult, Box<dyn s
                         for i in 0..max_cols {
                             let (matched, preview) = if i < record.len() {
                                 let field = &record[i];
-                                if field_matches(field, &mode) {
-                                    let s = String::from_utf8_lossy(field).trim().to_string();
-                                    let prev = if s.is_empty() { "<empty>".to_string() } else { s };
-                                    (true, prev)
-                                } else {
-                                    (false, String::new())
+                                match &mode {
+                                    SearchMode::MissingValues => {
+                                        if is_missing_value(field) {
+                                            let s = String::from_utf8_lossy(field).trim().to_string();
+                                            let prev = if s.is_empty() { "<empty>".to_string() } else { s };
+                                            (true, prev)
+                                        } else {
+                                            (false, String::new())
+                                        }
+                                    }
+                                    SearchMode::Outliers => {
+                                        if let Some(&(lower, upper)) = outlier_bounds_arc.get(&i) {
+                                            if !is_missing_value(field) {
+                                                if let Ok(s) = std::str::from_utf8(field) {
+                                                    if let Ok(val) = s.trim().parse::<f64>() {
+                                                        if val < lower || val > upper {
+                                                            (true, format!("{val} (expected [{lower:.2}, {upper:.2}])"))
+                                                        } else {
+                                                            (false, String::new())
+                                                        }
+                                                    } else {
+                                                        (false, String::new())
+                                                    }
+                                                } else {
+                                                    (false, String::new())
+                                                }
+                                            } else {
+                                                (false, String::new())
+                                            }
+                                        } else {
+                                            (false, String::new())
+                                        }
+                                    }
+                                    SearchMode::Text(_) => {
+                                        if field_matches(field, &mode) {
+                                            let s = String::from_utf8_lossy(field).trim().to_string();
+                                            (true, s)
+                                        } else {
+                                            (false, String::new())
+                                        }
+                                    }
                                 }
                             } else {
                                 // Column exists in header but not in this row -> missing value
@@ -878,8 +1577,11 @@ pub fn format_size(bytes: u64) -> String {
 
 pub fn format_report(result: &AnalysisResult) -> String {
     let mut out = String::new();
-    let is_missing = matches!(result.search_mode, SearchMode::MissingValues);
-    let target_label = if is_missing { "Missing Values" } else { "Matches" };
+    let target_label = match &result.search_mode {
+        SearchMode::MissingValues => "Missing Values",
+        SearchMode::Outliers => "Outliers",
+        SearchMode::Text(_) => "Matches",
+    };
 
     out.push_str("======================================================================\n");
     out.push_str("                        SEARCHUP CSV ANALYZER                         \n");

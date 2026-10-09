@@ -252,3 +252,64 @@ fn test_fill_column_wide() {
     assert!(contents.contains("2,pending"));
     assert!(contents.contains("4,pending"));
 }
+
+#[test]
+fn test_dataset_profiling() {
+    let mut temp = NamedTempFile::new().unwrap();
+    writeln!(temp, "id,age,is_active,created_at,city").unwrap();
+    writeln!(temp, "1,25,true,2024-01-01,London").unwrap();
+    writeln!(temp, "2,35,false,2024-01-02,Paris").unwrap();
+    writeln!(temp, "3,45,true,2024-01-03,London").unwrap();
+    writeln!(temp, "4,,false,2024-01-04,Berlin").unwrap();
+
+    let config = searchup::AnalysisConfig::new(temp.path().to_path_buf(), searchup::SearchMode::MissingValues, 2);
+    let profile = searchup::run_profile(&config).expect("Profiling failed");
+
+    assert_eq!(profile.total_rows, 4);
+    assert_eq!(profile.total_columns, 5);
+
+    // Column 1: id -> Integer
+    assert_eq!(profile.columns[0].inferred_type, searchup::InferredType::Integer);
+    assert_eq!(profile.columns[0].null_count, 0);
+
+    // Column 2: age -> Integer with 1 null
+    assert_eq!(profile.columns[1].inferred_type, searchup::InferredType::Integer);
+    assert_eq!(profile.columns[1].null_count, 1);
+    let age_stats = profile.columns[1].numeric_stats.as_ref().unwrap();
+    assert_eq!(age_stats.min, 25.0);
+    assert_eq!(age_stats.max, 45.0);
+    assert_eq!(age_stats.mean, 35.0);
+
+    // Column 3: is_active -> Boolean
+    assert_eq!(profile.columns[2].inferred_type, searchup::InferredType::Boolean);
+    assert_eq!(profile.columns[2].null_count, 0);
+
+    // Column 4: created_at -> DateTime
+    assert_eq!(profile.columns[3].inferred_type, searchup::InferredType::DateTime);
+
+    // Column 5: city -> String, London unique count
+    assert_eq!(profile.columns[4].inferred_type, searchup::InferredType::String);
+    assert_eq!(profile.columns[4].unique_count, 3);
+}
+
+#[test]
+fn test_outlier_detection() {
+    let mut temp = NamedTempFile::new().unwrap();
+    writeln!(temp, "id,val").unwrap();
+    // 10 normal values between 10 and 20
+    for i in 1..=10 {
+        writeln!(temp, "{},{}", i, 10 + i).unwrap();
+    }
+    // 1 massive outlier value 500 at row 12
+    writeln!(temp, "11,500").unwrap();
+
+    let config = searchup::AnalysisConfig::new(temp.path().to_path_buf(), searchup::SearchMode::Outliers, 2);
+    let result = searchup::run_analysis(&config).expect("Outlier analysis failed");
+
+    assert_eq!(result.total_rows, 11);
+    assert_eq!(result.total_matches, 1);
+    assert_eq!(result.affected_rows, 1);
+    assert_eq!(result.sample_occurrences.len(), 1);
+    assert_eq!(result.sample_occurrences[0].row, 12); // CSV line 12
+    assert!(result.sample_occurrences[0].value_preview.contains("500"));
+}

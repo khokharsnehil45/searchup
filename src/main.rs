@@ -1,7 +1,7 @@
 use clap::Parser;
 use searchup::{
-    format_fill_report, format_report, parse_coord, run_analysis, AnalysisConfig, FillConfig,
-    FillStrategy, FillTarget, SearchMode,
+    format_fill_report, format_profile_report, format_report, parse_coord, run_analysis,
+    AnalysisConfig, FillConfig, FillStrategy, FillTarget, SearchMode,
 };
 use std::path::PathBuf;
 use std::process;
@@ -11,17 +11,21 @@ use std::process;
     name = "searchup",
     author = "SearchUp",
     version,
-    about = "High-performance parallel CSV analyzer and imputer",
-    long_about = "A fast CLI tool that utilizes parallel worker threads to analyze CSV files, detect missing values, and fill/impute data completeness for AI agents."
+    about = "High-performance parallel CSV analyzer, profiler, and imputer",
+    long_about = "A fast CLI tool that utilizes parallel worker threads to analyze CSV files, detect missing values, find outliers, profile schemas, and fill/impute data completeness for AI agents."
 )]
 struct Args {
     /// Path to the CSV file to analyze or modify
     #[arg(short, long, value_name = "FILE")]
     load: PathBuf,
 
-    /// Target to search (e.g. 'missing_values', 'missing values', or text query)
+    /// Target to search (e.g. 'missing_values', 'outliers', or text query)
     #[arg(short, long, num_args(1..), value_name = "TARGET")]
     search: Option<Vec<String>>,
+
+    /// Generate a comprehensive data profile with type inference and column stats
+    #[arg(long)]
+    profile: bool,
 
     /// Number of parallel worker threads (defaults to available CPU cores)
     #[arg(short, long, value_name = "NUM")]
@@ -87,6 +91,43 @@ fn main() {
     if !args.load.exists() {
         eprintln!("Error: File '{}' does not exist.", args.load.display());
         process::exit(1);
+    }
+
+    // Check if profiling mode was requested
+    let is_profile = args.profile
+        || args.search.as_ref().map_or(false, |s| {
+            let q = s.join(" ").to_lowercase();
+            q == "profile" || q == "profiling" || q == "summary"
+        });
+
+    if is_profile {
+        // === Data Profiling Mode ===
+        let default_workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        let workers = args.workers.unwrap_or(default_workers);
+
+        let mut config = AnalysisConfig::new(args.load, SearchMode::MissingValues, workers);
+        config.batch_size = args.batch_size;
+
+        match searchup::run_profile(&config) {
+            Ok(report) => {
+                if args.json {
+                    println!("{}", report.to_json(true).unwrap());
+                } else {
+                    print!("{}", format_profile_report(&report));
+                }
+            }
+            Err(err) => {
+                if args.json {
+                    println!(r#"{{"status":"error","message":"{}"}}"#, err);
+                } else {
+                    eprintln!("Error during profiling: {}", err);
+                }
+                process::exit(1);
+            }
+        }
+        return;
     }
 
     if args.fill {
@@ -236,7 +277,7 @@ fn main() {
         }
     } else {
         eprintln!(
-            "Error: Please specify either --search <missing_values|pattern> or --fill ...\nUse --help for usage instructions."
+            "Error: Please specify --profile, --search <missing_values|outliers|pattern>, or --fill ...\nUse --help for usage instructions."
         );
         process::exit(1);
     }
