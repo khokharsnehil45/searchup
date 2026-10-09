@@ -292,6 +292,120 @@ pub fn execute_tool(
     }
 }
 
+// === Tool Call Fallback Parser for Local Models ===
+
+pub fn extract_fallback_tool_calls(
+    content: &str,
+    valid_tools: &[ToolDefinition],
+) -> Option<Vec<ToolCall>> {
+    let valid_names: std::collections::HashSet<&str> =
+        valid_tools.iter().map(|t| t.function.name.as_str()).collect();
+
+    let trimmed = content.trim();
+
+    // Strip markdown code fences if present (e.g. ```json ... ```)
+    let json_str = if trimmed.starts_with("```") {
+        let lines: Vec<&str> = trimmed.lines().collect();
+        if lines.len() >= 2 {
+            let start = 1;
+            let end = if lines.last().map_or(false, |l| l.trim().starts_with("```")) {
+                lines.len() - 1
+            } else {
+                lines.len()
+            };
+            lines[start..end].join("\n")
+        } else {
+            trimmed.to_string()
+        }
+    } else {
+        trimmed.to_string()
+    };
+
+    // 1. Try parsing entire string as JSON Value directly
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_str) {
+        if let Some(arr) = val.as_array() {
+            let mut calls = Vec::new();
+            for item in arr {
+                if let Some(call) = parse_single_tool_call(item, &valid_names) {
+                    calls.push(call);
+                }
+            }
+            if !calls.is_empty() {
+                return Some(calls);
+            }
+        } else if let Some(call) = parse_single_tool_call(&val, &valid_names) {
+            return Some(vec![call]);
+        }
+    }
+
+    // 2. Try handling malformed double/triple braces (e.g. {{...}}})
+    let sanitized = json_str.replace("{{{", "{").replace("{{", "{").replace("}}}", "}}");
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(&sanitized) {
+        if let Some(call) = parse_single_tool_call(&val, &valid_names) {
+            return Some(vec![call]);
+        }
+    }
+
+    // 3. Search for JSON object substring: {...}
+    if let Some(start_idx) = json_str.find('{') {
+        if let Some(end_idx) = json_str.rfind('}') {
+            if end_idx > start_idx {
+                let candidate = &json_str[start_idx..=end_idx];
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(candidate) {
+                    if let Some(call) = parse_single_tool_call(&val, &valid_names) {
+                        return Some(vec![call]);
+                    }
+                }
+                // Try candidate with sanitized braces
+                let cand_sanitized = candidate.replace("{{{", "{").replace("{{", "{").replace("}}}", "}}");
+                if let Ok(val) = serde_json::from_str::<serde_json::Value>(&cand_sanitized) {
+                    if let Some(call) = parse_single_tool_call(&val, &valid_names) {
+                        return Some(vec![call]);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn parse_single_tool_call(
+    val: &serde_json::Value,
+    valid_names: &std::collections::HashSet<&str>,
+) -> Option<ToolCall> {
+    let obj = val.as_object()?;
+    let name = obj
+        .get("name")
+        .or_else(|| obj.get("function"))
+        .and_then(|v| v.as_str())?;
+
+    if !valid_names.contains(name) {
+        return None;
+    }
+
+    let args_val = obj
+        .get("arguments")
+        .or_else(|| obj.get("parameters"))
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+
+    let arguments = if let Some(s) = args_val.as_str() {
+        s.to_string()
+    } else {
+        args_val.to_string()
+    };
+
+    Some(ToolCall {
+        id: format!("call_fallback_{}", name),
+        call_type: "function".to_string(),
+        function: FunctionCall {
+            name: name.to_string(),
+            arguments,
+        },
+    })
+}
+
 // === Agentic Loop Engine ===
 
 pub async fn run_agent_turn(
@@ -324,7 +438,15 @@ pub async fn run_agent_turn(
             }
         }
 
-        let resp = req_builder.send().await?;
+        print!("  {} {}\r", "⏳".dimmed(), "Thinking & querying model...".dimmed());
+        let _ = io::stdout().flush();
+
+        let resp = req_builder.send().await;
+        // Clear progress line
+        print!("\r{}\r", " ".repeat(40));
+        let _ = io::stdout().flush();
+
+        let resp = resp?;
         let status = resp.status();
         if !status.is_success() {
             let err_text = resp.text().await.unwrap_or_default();
@@ -342,7 +464,17 @@ pub async fn run_agent_turn(
             .next()
             .ok_or_else(|| "No completion choice returned by model")?;
 
-        let assistant_message = choice.message;
+        let mut assistant_message = choice.message;
+
+        // Fallback for smaller local models (e.g. Qwen, LLaMA) that output JSON tool calls in `content`
+        if assistant_message.tool_calls.as_ref().map_or(true, |tc| tc.is_empty()) {
+            if let Some(content) = &assistant_message.content {
+                if let Some(extracted) = extract_fallback_tool_calls(content, tools) {
+                    assistant_message.tool_calls = Some(extracted);
+                    assistant_message.content = None;
+                }
+            }
+        }
 
         // If the model produced tool calls, execute each tool call
         if let Some(tool_calls) = &assistant_message.tool_calls {
@@ -588,5 +720,42 @@ mod tests {
 
         assert!(result.contains("success"));
         assert!(result.contains("\"cells_updated\": 1") || result.contains("\"cells_updated\":1"));
+    }
+
+    #[test]
+    fn test_extract_fallback_tool_calls_json() {
+        let tools = get_agent_tools();
+        let raw_json = r#"{"name": "search_missing_values", "arguments": {"limit": 20}}"#;
+        let calls = extract_fallback_tool_calls(raw_json, &tools).expect("should extract call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "search_missing_values");
+        assert!(calls[0].function.arguments.contains("20"));
+    }
+
+    #[test]
+    fn test_extract_fallback_tool_calls_double_brace() {
+        let tools = get_agent_tools();
+        let raw_json = r#"{"name": "search_missing_values", "arguments": {{"limit": 20}}}"#;
+        let calls = extract_fallback_tool_calls(raw_json, &tools).expect("should extract call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "search_missing_values");
+        assert!(calls[0].function.arguments.contains("20"));
+    }
+
+    #[test]
+    fn test_extract_fallback_tool_calls_code_fence() {
+        let tools = get_agent_tools();
+        let markdown = "```json\n{\"name\": \"search_outliers\", \"arguments\": {\"limit\": 10}}\n```";
+        let calls = extract_fallback_tool_calls(markdown, &tools).expect("should extract call");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].function.name, "search_outliers");
+    }
+
+    #[test]
+    fn test_extract_fallback_tool_calls_ignore_regular_text() {
+        let tools = get_agent_tools();
+        let text = "Here is an explanation of the dataset. Everything looks clean.";
+        let calls = extract_fallback_tool_calls(text, &tools);
+        assert!(calls.is_none());
     }
 }
