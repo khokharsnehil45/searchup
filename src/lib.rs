@@ -1,3 +1,4 @@
+use colored::Colorize;
 use rayon::prelude::*;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
@@ -552,28 +553,51 @@ pub fn execute_fill(
 
 pub fn format_fill_report(result: &FillResult) -> String {
     let mut out = String::new();
-    out.push_str("======================================================================\n");
-    out.push_str("                     SEARCHUP CSV IMPUTER / FILLER                    \n");
-    out.push_str("======================================================================\n");
-    out.push_str(&format!("  Input File:      {}\n", result.file_path));
-    out.push_str(&format!("  Output File:     {}\n", result.output_path));
+    let banner_border = "======================================================================".cyan().bold();
+    let banner_title = "                     SEARCHUP CSV IMPUTER / FILLER                    ".bright_cyan().bold();
+    let divider = "----------------------------------------------------------------------".dimmed();
+
+    out.push_str(&format!("{}\n", banner_border));
+    out.push_str(&format!("{}\n", banner_title));
+    out.push_str(&format!("{}\n", banner_border));
+    out.push_str(&format!("  {:<16} {}\n", "Input File:".bold().white(), result.file_path.cyan()));
+    out.push_str(&format!("  {:<16} {}\n", "Output File:".bold().white(), result.output_path.bright_green().bold()));
     out.push_str(&format!(
-        "  Target Column:   {} (Index {})\n",
-        result.target_column, result.target_column_index
+        "  {:<16} {} {}\n",
+        "Target Column:".bold().white(),
+        result.target_column.bright_white().bold(),
+        format!("(Index {})", result.target_column_index).dimmed()
     ));
     match result.target_row {
-        Some(r) => out.push_str(&format!("  Target Row:      Row {}\n", r)),
-        None => out.push_str("  Target Scope:    Entire Column (All Missing Values)\n"),
+        Some(r) => out.push_str(&format!(
+            "  {:<16} {}\n",
+            "Target Row:".bold().white(),
+            format!("Row {}", r).bright_yellow().bold()
+        )),
+        None => out.push_str(&format!(
+            "  {:<16} {}\n",
+            "Target Scope:".bold().white(),
+            "Entire Column (All Missing Values)".bright_yellow().bold()
+        )),
     }
     out.push_str(&format!(
-        "  Strategy:        {}\n",
-        result.strategy.to_uppercase()
+        "  {:<16} {}\n",
+        "Strategy:".bold().white(),
+        result.strategy.to_uppercase().bright_magenta().bold()
     ));
-    out.push_str(&format!("  Imputed Value:   \"{}\"\n", result.imputed_value));
-    out.push_str(&format!("  Cells Updated:   {}\n", result.cells_updated));
-    out.push_str("======================================================================\n");
-    out.push_str("  Status: Successfully completed imputation.\n");
-    out.push_str("======================================================================\n");
+    out.push_str(&format!(
+        "  {:<16} {}\n",
+        "Imputed Value:".bold().white(),
+        format!("\"{}\"", result.imputed_value).bright_green().bold()
+    ));
+    out.push_str(&format!(
+        "  {:<16} {}\n",
+        "Cells Updated:".bold().white(),
+        format_number(result.cells_updated).bright_yellow().bold()
+    ));
+    out.push_str(&format!("{}\n", divider));
+    out.push_str(&format!("  {} {}\n", "✓".bright_green().bold(), "Successfully completed imputation.".bright_green()));
+    out.push_str(&format!("{}\n", banner_border));
     out
 }
 
@@ -1161,30 +1185,44 @@ pub fn run_profile(
 
 pub fn format_profile_report(report: &ProfileReport) -> String {
     let mut out = String::new();
-    out.push_str("========================================================================================================\n");
-    out.push_str("                                      SEARCHUP DATASET PROFILER                                         \n");
-    out.push_str("========================================================================================================\n");
-    out.push_str(&format!("  File:            {}\n", report.file_path));
-    out.push_str(&format!("  File Size:       {}\n", format_size(report.file_size_bytes)));
-    out.push_str(&format!("  Data Rows:       {}\n", format_number(report.total_rows)));
-    out.push_str(&format!("  Columns:         {}\n", report.total_columns));
-    out.push_str(&format!("  Total Cells:     {}\n", format_number(report.total_cells)));
-    out.push_str(&format!("  Workers:         {}\n", report.workers_used));
-    out.push_str("--------------------------------------------------------------------------------------------------------\n");
-    out.push_str("  #   Column Name      Type       Nulls     Null %   Uniques  Stats / Summary                           \n");
-    out.push_str("--------------------------------------------------------------------------------------------------------\n");
+    let border = "========================================================================================================".cyan().bold();
+    let title = "                                      SEARCHUP DATASET PROFILER                                         ".bright_cyan().bold();
+    let divider = "--------------------------------------------------------------------------------------------------------".dimmed();
+
+    out.push_str(&format!("{}\n", border));
+    out.push_str(&format!("{}\n", title));
+    out.push_str(&format!("{}\n", border));
+    out.push_str(&format!("  {:<16} {}\n", "File:".bold().white(), report.file_path.cyan()));
+    out.push_str(&format!("  {:<16} {}\n", "File Size:".bold().white(), format_size(report.file_size_bytes).bright_yellow()));
+    out.push_str(&format!("  {:<16} {}\n", "Data Rows:".bold().white(), format_number(report.total_rows).bright_yellow()));
+    out.push_str(&format!("  {:<16} {}\n", "Columns:".bold().white(), report.total_columns.to_string().bright_yellow()));
+    out.push_str(&format!("  {:<16} {}\n", "Total Cells:".bold().white(), format_number(report.total_cells).bright_yellow()));
+    out.push_str(&format!("  {:<16} {}\n", "Workers:".bold().white(), report.workers_used.to_string().bright_green()));
+    out.push_str(&format!("{}\n", divider));
+
+    let header_line = format!(
+        "  {:<3} {:<16} {:<10} {:>9} {:>9} {:>8}  {}",
+        "#", "Column Name", "Type", "Nulls", "Null %", "Uniques", "Stats / Summary"
+    );
+    out.push_str(&format!("{}\n", header_line.bold()));
+    out.push_str(&format!("{}\n", divider));
 
     for col in &report.columns {
         let stats_summary = if let Some(num) = &col.numeric_stats {
+            let outliers_fmt = if num.outlier_count > 0 {
+                format!("outliers: {}", num.outlier_count).bright_red().bold().to_string()
+            } else {
+                "outliers: 0".dimmed().to_string()
+            };
             format!(
-                "min: {}, max: {}, mean: {}, med: {}, outliers: {}",
-                num.min, num.max, num.mean, num.median, num.outlier_count
+                "min: {}, max: {}, mean: {:.2}, med: {:.2}, {}",
+                num.min, num.max, num.mean, num.median, outliers_fmt
             )
         } else if let Some(str_s) = &col.string_stats {
             let top_str = str_s
                 .top_values
                 .iter()
-                .map(|(v, c)| format!("\"{}\" ({})", v, c))
+                .map(|(v, c)| format!("\"{}\" ({})", v.bright_cyan(), c.to_string().dimmed()))
                 .collect::<Vec<_>>()
                 .join(", ");
             if top_str.is_empty() {
@@ -1193,7 +1231,7 @@ pub fn format_profile_report(report: &ProfileReport) -> String {
                 format!("len: [{}..{}], top: {}", str_s.min_length, str_s.max_length, top_str)
             }
         } else {
-            "-".to_string()
+            "-".dimmed().to_string()
         };
 
         let col_name_display = if col.name.len() > 16 {
@@ -1202,29 +1240,56 @@ pub fn format_profile_report(report: &ProfileReport) -> String {
             col.name.clone()
         };
 
+        let idx_str = format!("{:<3}", col.index).dimmed();
+        let name_str = format!("{:<16}", col_name_display).bright_white().bold();
+
+        let type_raw = format!("{:<10}", col.inferred_type.as_str());
+        let type_str = match col.inferred_type {
+            InferredType::Integer => type_raw.bright_cyan().bold(),
+            InferredType::Float => type_raw.bright_blue().bold(),
+            InferredType::Boolean => type_raw.bright_magenta().bold(),
+            InferredType::DateTime => type_raw.bright_yellow().bold(),
+            InferredType::String => type_raw.bright_green().bold(),
+            InferredType::Null => type_raw.dimmed(),
+        };
+
+        let null_count_raw = format!("{:>9}", format_number(col.null_count));
+        let null_pct_raw = format!("{:>8.1}%", col.null_percentage);
+
+        let (null_count_str, null_pct_str) = if col.null_count == 0 {
+            (null_count_raw.dimmed(), null_pct_raw.dimmed())
+        } else if col.null_percentage > 15.0 {
+            (null_count_raw.bright_red().bold(), null_pct_raw.bright_red().bold())
+        } else {
+            (null_count_raw.bright_yellow(), null_pct_raw.bright_yellow())
+        };
+
+        let unique_str = format!("{:>8}", format_number(col.unique_count)).white();
+
         out.push_str(&format!(
-            "  {:<3} {:<16} {:<10} {:>9} {:>9.1}% {:>8}  {}\n",
-            col.index,
-            col_name_display,
-            col.inferred_type.as_str(),
-            format_number(col.null_count),
-            col.null_percentage,
-            format_number(col.unique_count),
+            "  {} {} {} {} {} {}  {}\n",
+            idx_str,
+            name_str,
+            type_str,
+            null_count_str,
+            null_pct_str,
+            unique_str,
             stats_summary
         ));
     }
 
-    out.push_str("--------------------------------------------------------------------------------------------------------\n");
+    out.push_str(&format!("{}\n", divider));
     let rows_sec = if report.execution_time_ms > 0.0 {
         (report.total_rows as f64 / (report.execution_time_ms / 1000.0)).round()
     } else {
         0.0
     };
     out.push_str(&format!(
-        "  Execution Time:  {:.2} ms ({:.0} rows/sec)\n",
-        report.execution_time_ms, rows_sec
+        "  {:<18} {}\n",
+        "Execution Time:".bold().white(),
+        format!("{:.2} ms ({:.0} rows/sec)", report.execution_time_ms, rows_sec).bright_green().bold()
     ));
-    out.push_str("========================================================================================================\n");
+    out.push_str(&format!("{}\n", border));
     out
 }
 
@@ -1583,17 +1648,21 @@ pub fn format_report(result: &AnalysisResult) -> String {
         SearchMode::Text(_) => "Matches",
     };
 
-    out.push_str("======================================================================\n");
-    out.push_str("                        SEARCHUP CSV ANALYZER                         \n");
-    out.push_str("======================================================================\n");
-    out.push_str(&format!("  File:            {}\n", result.file_path.display()));
-    out.push_str(&format!("  File Size:       {}\n", format_size(result.file_size_bytes)));
-    out.push_str(&format!("  Search Target:   {}\n", result.search_mode.display_name()));
-    out.push_str(&format!("  Parallel Workers: {}\n", result.workers_used));
-    out.push_str(&format!("  Data Rows:       {}\n", format_number(result.total_rows)));
-    out.push_str(&format!("  Columns:         {}\n", result.total_columns));
-    out.push_str(&format!("  Total Cells:     {}\n", format_number(result.total_cells)));
-    out.push_str("----------------------------------------------------------------------\n");
+    let border = "======================================================================".cyan().bold();
+    let banner_title = "                        SEARCHUP CSV ANALYZER                         ".bright_cyan().bold();
+    let divider = "----------------------------------------------------------------------".dimmed();
+
+    out.push_str(&format!("{}\n", border));
+    out.push_str(&format!("{}\n", banner_title));
+    out.push_str(&format!("{}\n", border));
+    out.push_str(&format!("  {:<18} {}\n", "File:".bold().white(), result.file_path.display().to_string().cyan()));
+    out.push_str(&format!("  {:<18} {}\n", "File Size:".bold().white(), format_size(result.file_size_bytes).bright_yellow()));
+    out.push_str(&format!("  {:<18} {}\n", "Search Target:".bold().white(), result.search_mode.display_name().bright_magenta().bold()));
+    out.push_str(&format!("  {:<18} {}\n", "Parallel Workers:".bold().white(), result.workers_used.to_string().bright_green()));
+    out.push_str(&format!("  {:<18} {}\n", "Data Rows:".bold().white(), format_number(result.total_rows).bright_yellow()));
+    out.push_str(&format!("  {:<18} {}\n", "Columns:".bold().white(), result.total_columns.to_string().bright_yellow()));
+    out.push_str(&format!("  {:<18} {}\n", "Total Cells:".bold().white(), format_number(result.total_cells).bright_yellow()));
+    out.push_str(&format!("{}\n", divider));
 
     let cell_pct = if result.total_cells > 0 {
         (result.total_matches as f64 / result.total_cells as f64) * 100.0
@@ -1606,19 +1675,50 @@ pub fn format_report(result: &AnalysisResult) -> String {
         0.0
     };
 
+    let total_matches_str = format_number(result.total_matches);
+    let total_matches_colored = if result.total_matches == 0 {
+        total_matches_str.bright_green().bold()
+    } else if cell_pct > 10.0 {
+        total_matches_str.bright_red().bold()
+    } else {
+        total_matches_str.bright_yellow().bold()
+    };
+
+    let cell_pct_colored = if cell_pct == 0.0 {
+        format!("{:.2}%", cell_pct).bright_green()
+    } else if cell_pct > 10.0 {
+        format!("{:.2}%", cell_pct).bright_red().bold()
+    } else {
+        format!("{:.2}%", cell_pct).bright_yellow()
+    };
+
     out.push_str(&format!(
-        "  Total {}: {} ({:.2}% of all cells)\n",
-        target_label,
-        format_number(result.total_matches),
-        cell_pct
+        "  {:<22} {} ({} of all cells)\n",
+        format!("Total {}:", target_label).bold().white(),
+        total_matches_colored,
+        cell_pct_colored
     ));
+
+    let affected_rows_str = format_number(result.affected_rows);
+    let affected_rows_colored = if result.affected_rows == 0 {
+        affected_rows_str.bright_green().bold()
+    } else {
+        affected_rows_str.bright_yellow().bold()
+    };
+    let row_pct_colored = if row_pct == 0.0 {
+        format!("{:.2}%", row_pct).bright_green()
+    } else {
+        format!("{:.2}%", row_pct).bright_yellow()
+    };
+
     out.push_str(&format!(
-        "  Rows Affected:       {} ({:.2}% of data rows)\n",
-        format_number(result.affected_rows),
-        row_pct
+        "  {:<22} {} ({} of data rows)\n",
+        "Rows Affected:".bold().white(),
+        affected_rows_colored,
+        row_pct_colored
     ));
-    out.push_str("----------------------------------------------------------------------\n");
-    out.push_str(&format!("  Breakdown by Column ({}):\n", target_label));
+    out.push_str(&format!("{}\n", divider));
+    out.push_str(&format!("  {}:\n", format!("Breakdown by Column ({})", target_label).bold().bright_white()));
 
     // Find max column name length for clean alignment
     let max_name_len = result
@@ -1626,19 +1726,22 @@ pub fn format_report(result: &AnalysisResult) -> String {
         .iter()
         .map(|c| c.name.len())
         .max()
-        .unwrap_or(10)
-        .max(11)
+        .unwrap_or(12)
+        .max(14)
         .min(30);
 
-    out.push_str(&format!(
-        "    {:<4} {:<width$} {:>12} {:>10}  {}\n",
+    let target_header_width = target_label.len().max(14);
+    let col_header = format!(
+        "    {:<4} {:<width$} {:>t_width$} {:>10}  {}",
         "#",
         "Column Name",
         target_label,
         "Percentage",
         "Distribution",
-        width = max_name_len
-    ));
+        width = max_name_len,
+        t_width = target_header_width
+    );
+    out.push_str(&format!("{}\n", col_header.bold()));
 
     for col in &result.column_stats {
         let col_pct = if col.total_rows > 0 {
@@ -1653,39 +1756,78 @@ pub fn format_report(result: &AnalysisResult) -> String {
             col.name.clone()
         };
 
+        let idx_str = format!("{:<4}", col.index).dimmed();
+        let name_str = format!("{:<width$}", display_name, width = max_name_len).bright_white().bold();
+
+        let count_num = format_number(col.match_count);
+        let count_str = if col.match_count == 0 {
+            format!("{:>t_width$}", count_num, t_width = target_header_width).dimmed()
+        } else if col_pct > 15.0 {
+            format!("{:>t_width$}", count_num, t_width = target_header_width).bright_red().bold()
+        } else {
+            format!("{:>t_width$}", count_num, t_width = target_header_width).bright_yellow()
+        };
+
+        let pct_num = format!("{:>9.2}%", col_pct);
+        let pct_str = if col.match_count == 0 {
+            pct_num.dimmed()
+        } else if col_pct > 15.0 {
+            pct_num.bright_red().bold()
+        } else {
+            pct_num.bright_yellow()
+        };
+
+        let bar_display = format!("{}{}{}", "[".dimmed(), bar, "]".dimmed());
+
         out.push_str(&format!(
-            "    {:<4} {:<width$} {:>12} {:>9.2}%  [{}]\n",
-            col.index,
-            display_name,
-            format_number(col.match_count),
-            col_pct,
-            bar,
-            width = max_name_len
+            "    {} {} {} {}  {}\n",
+            idx_str,
+            name_str,
+            count_str,
+            pct_str,
+            bar_display
         ));
     }
 
     if !result.sample_occurrences.is_empty() {
-        out.push_str("----------------------------------------------------------------------\n");
+        out.push_str(&format!("{}\n", divider));
         if result.sample_occurrences.len() >= result.total_matches {
             out.push_str(&format!(
-                "  All Occurrences ({}/{}):\n",
-                result.sample_occurrences.len(),
-                result.total_matches
+                "  {}\n",
+                format!("All Occurrences ({}/{}):", result.sample_occurrences.len(), result.total_matches).bold().bright_yellow()
             ));
         } else {
             out.push_str(&format!(
-                "  Sample Occurrences (showing {} of {}, use --all to view all):\n",
-                result.sample_occurrences.len(),
-                format_number(result.total_matches)
+                "  {} {}\n",
+                format!("Sample Occurrences (showing {} of {},", result.sample_occurrences.len(), format_number(result.total_matches)).bold().bright_yellow(),
+                "use --all to view all):".dimmed()
             ));
         }
         for occ in &result.sample_occurrences {
+            let val_display = if occ.value_preview.is_empty()
+                || occ.value_preview.eq_ignore_ascii_case("<empty>")
+            {
+                "<empty>".bright_red().bold().to_string()
+            } else if occ.value_preview.eq_ignore_ascii_case("null")
+                || occ.value_preview.eq_ignore_ascii_case("na")
+                || occ.value_preview.eq_ignore_ascii_case("n/a")
+                || occ.value_preview.eq_ignore_ascii_case("nan")
+                || occ.value_preview.eq_ignore_ascii_case("none")
+                || occ.value_preview == "?"
+            {
+                occ.value_preview.bright_red().bold().to_string()
+            } else {
+                occ.value_preview.bright_yellow().to_string()
+            };
+
             out.push_str(&format!(
-                "    - Row {:<6} | Column {:<2} (\"{}\") -> {}\n",
-                occ.row,
-                occ.col_idx + 1,
-                occ.col_name,
-                occ.value_preview
+                "    {} Row {:<6} {} Column {:<2} ({}) -> {}\n",
+                "-".dimmed(),
+                format!("{}", occ.row).cyan(),
+                "|".dimmed(),
+                format!("{}", occ.col_idx + 1).cyan(),
+                format!("\"{}\"", occ.col_name).bright_white().bold(),
+                val_display
             ));
         }
     }
@@ -1702,12 +1844,13 @@ pub fn format_report(result: &AnalysisResult) -> String {
         0.0
     };
 
-    out.push_str("======================================================================\n");
+    out.push_str(&format!("{}\n", border));
     out.push_str(&format!(
-        "  Execution Time:  {:.2?} ({:.1} rows/sec, {:.1} cells/sec)\n",
-        result.duration, rows_per_sec, cells_per_sec
+        "  {:<18} {}\n",
+        "Execution Time:".bold().white(),
+        format!("{:.2?} ({:.1} rows/sec, {:.1} cells/sec)", result.duration, rows_per_sec, cells_per_sec).bright_green().bold()
     ));
-    out.push_str("======================================================================\n");
+    out.push_str(&format!("{}\n", border));
 
     out
 }
@@ -1716,7 +1859,20 @@ fn generate_progress_bar(pct: f64, width: usize) -> String {
     let filled = ((pct / 100.0) * width as f64).round() as usize;
     let filled = filled.min(width);
     let empty = width.saturating_sub(filled);
-    format!("{}{}", "=".repeat(filled), " ".repeat(empty))
+
+    if filled == 0 {
+        " ".repeat(width)
+    } else {
+        let bar_chars = "=".repeat(filled);
+        let colored_bar = if pct > 20.0 {
+            bar_chars.bright_red().bold()
+        } else if pct > 5.0 {
+            bar_chars.bright_yellow().bold()
+        } else {
+            bar_chars.bright_green().bold()
+        };
+        format!("{}{}", colored_bar, " ".repeat(empty))
+    }
 }
 
 fn format_number(n: usize) -> String {
@@ -1826,5 +1982,89 @@ mod tests {
         assert_eq!(parse_coord("[10, score]").unwrap(), (10, "score".to_string()));
         assert!(parse_coord("invalid").is_err());
         assert!(parse_coord("1,age").is_err()); // row 1 is header
+    }
+
+    #[test]
+    fn test_report_formatting() {
+        let result = AnalysisResult {
+            file_path: PathBuf::from("test.csv"),
+            file_size_bytes: 1024,
+            search_mode: SearchMode::MissingValues,
+            workers_used: 4,
+            duration: Duration::from_millis(50),
+            total_rows: 10,
+            total_columns: 2,
+            total_cells: 20,
+            affected_rows: 2,
+            total_matches: 3,
+            column_stats: vec![
+                ColumnStats {
+                    index: 1,
+                    name: "col1".to_string(),
+                    match_count: 1,
+                    total_rows: 10,
+                },
+                ColumnStats {
+                    index: 2,
+                    name: "col2".to_string(),
+                    match_count: 2,
+                    total_rows: 10,
+                },
+            ],
+            sample_occurrences: vec![Occurrence {
+                row: 2,
+                col_idx: 0,
+                col_name: "col1".to_string(),
+                value_preview: "<empty>".to_string(),
+            }],
+        };
+
+        let report = format_report(&result);
+        assert!(report.contains("SEARCHUP CSV ANALYZER"));
+        assert!(report.contains("col1"));
+        assert!(report.contains("col2"));
+
+        let fill_res = FillResult {
+            status: "success".to_string(),
+            action: "fill".to_string(),
+            file_path: "input.csv".to_string(),
+            output_path: "output.csv".to_string(),
+            target_row: Some(5),
+            target_column: "age".to_string(),
+            target_column_index: 2,
+            strategy: "mean".to_string(),
+            imputed_value: "35.5".to_string(),
+            cells_updated: 1,
+        };
+        let fill_report = format_fill_report(&fill_res);
+        assert!(fill_report.contains("SEARCHUP CSV IMPUTER / FILLER"));
+        assert!(fill_report.contains("Row 5"));
+        assert!(fill_report.contains("35.5"));
+
+        let prof_report = ProfileReport {
+            file_path: "input.csv".to_string(),
+            file_size_bytes: 512,
+            workers_used: 2,
+            total_rows: 100,
+            total_columns: 1,
+            total_cells: 100,
+            execution_time_ms: 10.0,
+            columns: vec![ColumnProfile {
+                index: 1,
+                name: "age".to_string(),
+                inferred_type: InferredType::Integer,
+                total_rows: 100,
+                non_null_count: 95,
+                null_count: 5,
+                null_percentage: 5.0,
+                unique_count: 50,
+                unique_percentage: 50.0,
+                numeric_stats: None,
+                string_stats: None,
+            }],
+        };
+        let prof_formatted = format_profile_report(&prof_report);
+        assert!(prof_formatted.contains("SEARCHUP DATASET PROFILER"));
+        assert!(prof_formatted.contains("Integer"));
     }
 }

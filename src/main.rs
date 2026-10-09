@@ -1,4 +1,5 @@
 use clap::Parser;
+use colored::Colorize;
 use searchup::{
     format_fill_report, format_profile_report, format_report, parse_coord, run_analysis,
     AnalysisConfig, FillConfig, FillStrategy, FillTarget, SearchMode,
@@ -76,20 +77,28 @@ struct Args {
     /// Overwrite the loaded CSV in-place safely via atomic temporary file
     #[arg(long)]
     in_place: bool,
+
+    /// Disable colored terminal output
+    #[arg(long)]
+    no_color: bool,
 }
 
 fn main() {
     let args = Args::parse();
 
+    if args.no_color {
+        colored::control::set_override(false);
+    }
+
     if let Some(w) = args.workers {
         if w == 0 {
-            eprintln!("Error: --workers must be greater than 0");
+            eprintln!("{}: --workers must be greater than 0", "Error".bright_red().bold());
             process::exit(1);
         }
     }
 
     if !args.load.exists() {
-        eprintln!("Error: File '{}' does not exist.", args.load.display());
+        eprintln!("{}: File '{}' does not exist.", "Error".bright_red().bold(), args.load.display());
         process::exit(1);
     }
 
@@ -122,7 +131,7 @@ fn main() {
                 if args.json {
                     println!(r#"{{"status":"error","message":"{}"}}"#, err);
                 } else {
-                    eprintln!("Error during profiling: {}", err);
+                    eprintln!("{}: {}", "Error during profiling".bright_red().bold(), err);
                 }
                 process::exit(1);
             }
@@ -140,7 +149,7 @@ fn main() {
                         r#"{{"status":"error","message":"--fill requires --val <value|mean|median|mode>"}}"#
                     );
                 } else {
-                    eprintln!("Error: --fill requires --val <value|mean|median|mode>");
+                    eprintln!("{}: --fill requires --val <value|mean|median|mode>", "Error".bright_red().bold());
                 }
                 process::exit(1);
             }
@@ -156,7 +165,7 @@ fn main() {
                     if args.json {
                         println!(r#"{{"status":"error","message":"{}"}}"#, err);
                     } else {
-                        eprintln!("Error: {}", err);
+                        eprintln!("{}: {}", "Error".bright_red().bold(), err);
                     }
                     process::exit(1);
                 }
@@ -170,7 +179,8 @@ fn main() {
                 );
             } else {
                 eprintln!(
-                    "Error: --fill requires either --coord <row,col> (e.g. --coord 5,age) or --col <name/index>"
+                    "{}: --fill requires either --coord <row,col> (e.g. --coord 5,age) or --col <name/index>",
+                    "Error".bright_red().bold()
                 );
             }
             process::exit(1);
@@ -227,7 +237,7 @@ fn main() {
                 if args.json {
                     println!(r#"{{"status":"error","message":"{}"}}"#, err);
                 } else {
-                    eprintln!("Error: {}", err);
+                    eprintln!("{}: {}", "Error".bright_red().bold(), err);
                 }
                 process::exit(1);
             }
@@ -235,7 +245,7 @@ fn main() {
     } else if let Some(search_parts) = &args.search {
         // === Search / Analysis Mode ===
         if search_parts.is_empty() {
-            eprintln!("Error: Please provide a search target (e.g. --search missing_values)");
+            eprintln!("{}: Please provide a search target (e.g. --search missing_values)", "Error".bright_red().bold());
             process::exit(1);
         }
 
@@ -261,7 +271,7 @@ fn main() {
                     match result.to_json(true) {
                         Ok(json_output) => println!("{}", json_output),
                         Err(err) => {
-                            eprintln!("Error generating JSON: {}", err);
+                            eprintln!("{}: {}", "Error generating JSON".bright_red().bold(), err);
                             process::exit(1);
                         }
                     }
@@ -271,13 +281,14 @@ fn main() {
                 }
             }
             Err(err) => {
-                eprintln!("Error during analysis: {}", err);
+                eprintln!("{}: {}", "Error during analysis".bright_red().bold(), err);
                 process::exit(1);
             }
         }
     } else {
         eprintln!(
-            "Error: Please specify --profile, --search <missing_values|outliers|pattern>, or --fill ...\nUse --help for usage instructions."
+            "{}: Please specify --profile, --search <missing_values|outliers|pattern>, or --fill ...\nUse --help for usage instructions.",
+            "Error".bright_red().bold()
         );
         process::exit(1);
     }

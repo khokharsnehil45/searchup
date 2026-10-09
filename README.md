@@ -20,7 +20,7 @@
 - **Smart Missing Value Detection**: Detects empty cells, whitespace-only fields, omitted columns, and common missing value indicators (`NA`, `N/A`, `NULL`, `None`, `NaN`, `?`).
 - **Missing Value Imputation Engine**: Repair missing cells with `--fill`, targeting coordinates `--coord 5,age` and applying strategies (`literal`, `mean`, `median`, `mode`).
 - **Flexible Search Querying**: Supports `--search missing_values`, `--search outliers`, and custom text pattern searching across columns.
-- **Detailed Terminal Reports & JSON**: Generates clear summaries, distribution bars, sample locations, or agent-ready structured JSON.
+- **Detailed Terminal Reports & JSON**: Vibrant ANSI-colored terminal reports with progress bars, type highlights, and severity indicators (supports `--no-color` / `NO_COLOR`), or agent-ready structured JSON (`--json`).
 
 ---
 
@@ -252,6 +252,7 @@ Fill / Imputation Options:
       --val <VALUE>              Imputed value or strategy ('mean', 'median', 'mode', or literal)
   -o, --out <FILE>               Destination file to write modified CSV
       --in-place                 Overwrite loaded CSV in-place safely via atomic temporary file
+      --no-color                 Disable colored terminal output
   -h, --help                     Print help
   -V, --version                  Print version
 ```
